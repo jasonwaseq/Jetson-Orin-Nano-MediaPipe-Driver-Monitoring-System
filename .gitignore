@@ -1,0 +1,51 @@
+# Python bytecode / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Build/test/tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.tmp
+
+# Runtime outputs and media artifacts
+*.log
+output_with_landmarks.mp4
+output*.mp4
+captures/
+recordings/
+
+# Local config and secrets
+.env
+.env.*
+*.local
+local_settings.*
+config/local.*
+
+# Sensitive key/cert material
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.ovpn
+*.mobileconfig
+
+# Local network/deployment notes (may include private IPs)
+*.ip.txt
+network_notes.*
+deploy_notes.*
