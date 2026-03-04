@@ -49,3 +49,5 @@ config/local.*
 *.ip.txt
 network_notes.*
 deploy_notes.*
+
+.txt

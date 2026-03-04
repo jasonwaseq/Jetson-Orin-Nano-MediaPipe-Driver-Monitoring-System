@@ -1,44 +1,38 @@
-# MediaPipe Driver Alert Stream
+# MediaPipe Driver Alert Uplink
 
-This project runs face-based driver monitoring with MediaPipe and exposes **only alert events** over a WebSocket for a Flutter mobile client.
+This project runs face-based driver monitoring with MediaPipe and emits **alert events only**.
 
-MediaPipe Integration: @J8Soham
+Integration path is now MQTT-first for cloud relay architectures:
+
+`Jetson detector -> MQTT uplink -> event consumers -> Postgres -> WebSocket gateway downlink`
+
+No frame stream is sent by this script.
 
 ## What It Detects
 
 - Eye-closure (drowsiness) events
 - Head-inattention events
 
-When an event is detected, the script sends an `alert` JSON payload to connected WebSocket clients.
-
-## Current WebSocket Behavior
-
-The WebSocket server sends only:
-
-- `alert` with `code: "drowsiness_detected"`
-- `alert` with `code: "head_inattention_detected"`
-
-It does **not** stream processed frames.
-
 ## Project Files
 
-- `face_detect_mediapipe.py`: main detection + WebSocket broadcaster
+- `face_detect_mediapipe.py`: detection + event publishing (MQTT uplink + optional local WebSocket)
 
 ## Requirements
 
 - Python 3.10+
 - Webcam (or update `VIDEO_SOURCE` in the script)
-- Python packages used by the script:
+- Python packages:
   - `mediapipe`
   - `opencv-python`
   - `numpy`
-  - `websockets`
+  - `paho-mqtt`
+  - `websockets` (optional, only if enabling local WS output)
 
 ## Setup
 
 ```bash
 python3 -m venv venv
-./venv/bin/pip install mediapipe opencv-python numpy websockets
+./venv/bin/pip install mediapipe opencv-python numpy paho-mqtt websockets
 ```
 
 ## Run
@@ -47,39 +41,74 @@ python3 -m venv venv
 ./venv/bin/python face_detect_mediapipe.py
 ```
 
-## WebSocket Configuration
+## Environment Variables
 
-The script reads these environment variables:
+### Event metadata
 
-- `MP_WS_ENABLED` (default: `1`)
-- `MP_WS_HOST` (default: `0.0.0.0`)
-- `MP_WS_PORT` (default: `8765`)
+- `MP_SOURCE_ID` (default: hostname)
+- `MP_EVENT_PRODUCER` (default: `mediapipe-driver-monitor`)
+- `MP_EVENT_SCHEMA_VERSION` (default: `1.0`)
+
+### MQTT uplink (primary)
+
+- `MP_MQTT_ENABLED` (default: `1`)
+- `MP_MQTT_HOST` (default: `127.0.0.1`)
+- `MP_MQTT_PORT` (default: `1883`)
+- `MP_MQTT_TOPIC` (default: `sleepydrive/alerts/<source_id>`)
+- `MP_MQTT_CLIENT_ID` (default: `uplink-<source_id>`)
+- `MP_MQTT_USERNAME` (optional)
+- `MP_MQTT_PASSWORD` (optional)
+- `MP_MQTT_QOS` (default: `1`, allowed: `0..2`)
+- `MP_MQTT_RETAIN` (default: `0`)
+- `MP_MQTT_TLS` (default: `0`)
+- `MP_MQTT_TLS_INSECURE` (default: `0`)
+- `MP_MQTT_KEEPALIVE` (default: `60`)
 
 Example:
 
 ```bash
-export MP_WS_ENABLED=1
-export MP_WS_HOST=0.0.0.0
-export MP_WS_PORT=8765
+export MP_SOURCE_ID=jetson-cam-01
+export MP_MQTT_ENABLED=1
+export MP_MQTT_HOST=73797b78ceac47e998c30ac034930c26.s1.eu.hivemq.cloud
+export MP_MQTT_PORT=8883
+export MP_MQTT_TOPIC=sleepydrive/alerts/jetson-cam-01
+export MP_MQTT_CLIENT_ID=uplink-jetson-cam-01
+export MP_MQTT_USERNAME=group7
+export MP_MQTT_PASSWORD='replace_me'
+export MP_MQTT_TLS=1
+export MP_MQTT_QOS=1
+export MP_MQTT_RETAIN=0
 ./venv/bin/python face_detect_mediapipe.py
 ```
 
-Flutter app URL format:
+Gateway consumer subscribe topic:
 
 ```text
-ws://<JETSON_OR_TAILSCALE_IP>:8765
+sleepydrive/alerts/+
 ```
 
-Use your own runtime IP address; do not hardcode private network details into source files.
+### Local WebSocket output (optional debug only)
 
-## Alert Message Shape
+- `MP_WS_ENABLED` (default: `0`)
+- `MP_WS_HOST` (default: `0.0.0.0`)
+- `MP_WS_PORT` (default: `8765`)
 
-Example payload:
+If you run a separate cloud WebSocket gateway service, keep this disabled.
+
+## Event Payload Shape
+
+Example `alert` payload:
 
 ```json
 {
   "type": "alert",
-  "timestamp": "2026-03-03T20:00:00.000000+00:00",
+  "event_type": "alert",
+  "timestamp": "2026-03-04T16:00:00.000000+00:00",
+  "event_id": "f39304f3-c4a7-4bcf-b212-952005d7fbb4",
+  "event_version": "1.0",
+  "source_id": "jetson-cam-01",
+  "producer": "mediapipe-driver-monitor",
+  "sequence": 42,
   "code": "drowsiness_detected",
   "message": "DROWSINESS DETECTED! Event #3 (eyes closed 1.6s)",
   "severity": "critical",
@@ -90,10 +119,10 @@ Example payload:
 }
 ```
 
-`head_inattention_detected` uses the same envelope with relevant fields in `data`.
+`head_inattention_detected` uses the same envelope with corresponding `data` fields.
 
 ## Security Notes
 
-- Keep network addresses, tokens, and credentials out of source control.
-- Use environment variables or local untracked config for deployment-specific values.
-- Review logs before sharing externally.
+- Keep broker addresses, credentials, and tokens out of source control.
+- Use TLS (`MP_MQTT_TLS=1`) for cloud brokers.
+- Scope broker ACLs by topic and client ID.

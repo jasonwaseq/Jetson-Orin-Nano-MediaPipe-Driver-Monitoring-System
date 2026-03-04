@@ -11,12 +11,61 @@ import os
 import queue
 import threading
 import urllib.request
+import uuid
 import numpy as np
+from jetson_alert_dispatcher import JetsonAlertDispatcher
 
 
 def utc_timestamp():
     """Return an RFC3339 UTC timestamp."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def env_bool(name, default=False):
+    """Parse boolean environment variables."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def env_int(name, default):
+    """Parse integer environment variables."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def env_first(names, default=None):
+    """Return first non-empty environment variable from a list of names."""
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and value != "":
+            return value
+    return default
+
+
+def env_int_first(names, default):
+    """Parse first non-empty integer environment variable from names."""
+    value = env_first(names)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def env_bool_first(names, default=False):
+    """Parse first non-empty boolean environment variable from names."""
+    value = env_first(names)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
 class WebSocketBroadcaster:
@@ -122,13 +171,15 @@ class WebSocketBroadcaster:
                 continue
             message = json.dumps(item)
             stale = []
-            for client in self.clients:
+            # Iterate over a snapshot; handlers may add/remove clients concurrently.
+            for client in tuple(self.clients):
                 try:
                     await client.send(message)
                 except Exception:
                     stale.append(client)
             for client in stale:
                 self.clients.discard(client)
+
 
 # Model download setup
 MODEL_DIR = "../model/facenet_vpruned_quantized_v2.0.1"
@@ -150,10 +201,18 @@ download_model(MODEL_URL, MODEL_PATH)
 
 VIDEO_SOURCE = 0
 
-# ── WebSocket Output Parameters ──
-WS_ENABLED = os.getenv("MP_WS_ENABLED", "1").lower() not in {"0", "false", "no"}
+# ── Event Routing Parameters ──
+EVENT_SOURCE_ID = os.getenv("MP_SOURCE_ID", "jetson-01")
+EVENT_PRODUCER = os.getenv("MP_EVENT_PRODUCER", "mediapipe-driver-monitor")
+EVENT_SCHEMA_VERSION = os.getenv("MP_EVENT_SCHEMA_VERSION", "1.0")
+
+# ── WebSocket Output Parameters (optional local debug only) ──
+WS_ENABLED = env_bool("MP_WS_ENABLED", False)
 WS_HOST = os.getenv("MP_WS_HOST", "0.0.0.0")
-WS_PORT = int(os.getenv("MP_WS_PORT", "8765"))
+WS_PORT = env_int("MP_WS_PORT", 8765)
+
+# ── MQTT Uplink Parameters (primary integration path) ──
+MQTT_ENABLED = env_bool_first(["MP_MQTT_ENABLED", "MP_QTT_ENABLED", "MPMQTT_ENABLED", "MPQTT_ENABLED"], True)
 
 # ── EAR (Eye Aspect Ratio) Parameters ──
 EAR_THRESHOLD = 0.21          # Below this = eyes closed (lowered for better sensitivity)
@@ -188,19 +247,49 @@ head_deviated_start = None        # when head first deviated
 HEAD_INATTENTION_ACTIVE = False
 HEAD_INATTENTION_COUNT = 0
 
+event_sinks = []
+event_sequence = 0
+event_sequence_lock = threading.Lock()
+
 ws_broadcaster = None
 if WS_ENABLED:
     ws_broadcaster = WebSocketBroadcaster(host=WS_HOST, port=WS_PORT)
     if not ws_broadcaster.start():
         ws_broadcaster = None
+    else:
+        event_sinks.append(ws_broadcaster)
+
+dispatcher = None
+if MQTT_ENABLED:
+    dispatcher = JetsonAlertDispatcher.from_env()
+    if not dispatcher.connect():
+        dispatcher = None
+
+if not event_sinks and dispatcher is None:
+    print("Warning: no event sink enabled. Alerts will not be forwarded.")
 
 
 def emit_event(event_type, **payload):
-    """Emit a structured event to websocket clients."""
-    if ws_broadcaster is None:
+    """Emit a structured event to all configured sinks."""
+    if not event_sinks:
         return
-    event = {"type": event_type, "timestamp": utc_timestamp(), **payload}
-    ws_broadcaster.send(event)
+    global event_sequence
+    with event_sequence_lock:
+        event_sequence += 1
+        sequence = event_sequence
+    event = {
+        "type": event_type,
+        "event_type": event_type,
+        "timestamp": utc_timestamp(),
+        "event_id": str(uuid.uuid4()),
+        "event_version": EVENT_SCHEMA_VERSION,
+        "source_id": EVENT_SOURCE_ID,
+        "producer": EVENT_PRODUCER,
+        "sequence": sequence,
+        **payload,
+    }
+    for sink in event_sinks:
+        sink.send(event)
 
 
 def emit_log(message, level="info", **data):
@@ -208,12 +297,32 @@ def emit_log(message, level="info", **data):
     print(message)
 
 
+def severity_to_level(severity):
+    """Map string severities to numeric dispatcher levels."""
+    mapping = {
+        "info": 0,
+        "warning": 1,
+        "high": 2,
+        "critical": 2,
+    }
+    return mapping.get(str(severity).lower(), 1)
+
+
 def emit_alert(code, message, severity="warning", **data):
-    """Emit alert payload to websocket clients."""
+    """Emit alert payload to all configured event sinks."""
     payload = {"code": code, "message": message, "severity": severity}
     if data:
         payload["data"] = data
     emit_event("alert", **payload)
+    if dispatcher is not None:
+        metadata = {"code": code, "severity": severity}
+        metadata.update(data)
+        ok = dispatcher.publish_alert(
+            level=severity_to_level(severity),
+            message=message,
+            metadata=metadata,
+        )
+        emit_log(f"MQTT publish ok={ok} code={code} message={message}")
 
 
 cap = cv2.VideoCapture(VIDEO_SOURCE)
@@ -386,6 +495,8 @@ try:
                                     severity="critical",
                                     event_count=DROWSY_EVENT_COUNT,
                                     closed_duration_sec=round(closed_duration, 3),
+                                    ear=round(ear, 3),
+                                    blink_ms=int(closed_duration * 1000),
                                 )
                             DROWSY_ALERT_ACTIVE = True
                 else:
@@ -497,6 +608,8 @@ finally:
     cv2.destroyAllWindows()
     if ws_broadcaster is not None:
         ws_broadcaster.stop()
+    if dispatcher is not None:
+        dispatcher.close()
 
 emit_log(f"\n{'='*50}")
 emit_log(f"Processing complete! Total frames: {frame_count}")
