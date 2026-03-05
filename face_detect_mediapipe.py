@@ -181,6 +181,55 @@ class WebSocketBroadcaster:
                 self.clients.discard(client)
 
 
+class LatestFrameReader:
+    """Read camera frames on a background thread and keep only the newest frame."""
+
+    def __init__(self, cap, queue_size=1):
+        self.cap = cap
+        self.queue = queue.Queue(maxsize=max(1, queue_size))
+        self.stop_event = threading.Event()
+        self.thread = None
+        self.frames_read = 0
+        self.frames_dropped = 0
+        self.read_failed = False
+
+    def start(self):
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        while not self.stop_event.is_set():
+            success, frame = self.cap.read()
+            if not success:
+                self.read_failed = True
+                self.stop_event.set()
+                break
+            self.frames_read += 1
+            item = (int(time.time() * 1000), frame)
+            if self.queue.full():
+                try:
+                    self.queue.get_nowait()
+                    self.frames_dropped += 1
+                except queue.Empty:
+                    pass
+            try:
+                self.queue.put_nowait(item)
+            except queue.Full:
+                self.frames_dropped += 1
+
+    def read(self, timeout=1.0):
+        """Return (timestamp_ms, frame) or (None, None) when no frame is available."""
+        try:
+            return self.queue.get(timeout=timeout)
+        except queue.Empty:
+            return None, None
+
+    def stop(self):
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout=2.0)
+
+
 # Model download setup
 MODEL_DIR = "../model/facenet_vpruned_quantized_v2.0.1"
 MODEL_PATH = os.path.join(MODEL_DIR, "face_landmarker.task")
@@ -200,6 +249,12 @@ def download_model(url, path):
 download_model(MODEL_URL, MODEL_PATH)
 
 VIDEO_SOURCE = 0
+CAMERA_BUFFER_SIZE = max(1, env_int("MP_CAMERA_BUFFER_SIZE", 1))
+CAMERA_TARGET_FPS = env_int("MP_CAMERA_TARGET_FPS", 30)
+CAPTURE_QUEUE_SIZE = max(1, env_int("MP_CAPTURE_QUEUE_SIZE", 1))
+DISPLAY_ENABLED = env_bool("MP_DISPLAY_ENABLED", True)
+SAVE_OUTPUT_VIDEO = env_bool("MP_SAVE_OUTPUT_VIDEO", False)
+OUTPUT_VIDEO_PATH = os.getenv("MP_OUTPUT_VIDEO_PATH", "output_with_landmarks.mp4")
 
 # ── Event Routing Parameters ──
 EVENT_SOURCE_ID = os.getenv("MP_SOURCE_ID", "jetson-01")
@@ -331,20 +386,34 @@ if not cap.isOpened():
     emit_log(f"Error: Could not open video source {VIDEO_SOURCE}", level="error")
     exit()
 
+buffer_set_ok = cap.set(cv2.CAP_PROP_BUFFERSIZE, CAMERA_BUFFER_SIZE)
+if CAMERA_TARGET_FPS > 0:
+    cap.set(cv2.CAP_PROP_FPS, CAMERA_TARGET_FPS)
+
 # Get video properties
 fps = cap.get(cv2.CAP_PROP_FPS)
 if fps == 0:
     fps = 30
 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+buffer_size_after = cap.get(cv2.CAP_PROP_BUFFERSIZE)
 
 emit_log(f"Video info: {width}x{height} @ {fps} FPS")
+emit_log(
+    f"Latency config: buffer_set_ok={buffer_set_ok} buffer_size={buffer_size_after} "
+    f"capture_queue={CAPTURE_QUEUE_SIZE} display={DISPLAY_ENABLED} "
+    f"save_output={SAVE_OUTPUT_VIDEO} target_fps={CAMERA_TARGET_FPS}"
+)
 emit_log(f"Using model: {MODEL_PATH}")
 
 # Setup output video
-output_path = "output_with_landmarks.mp4"
-fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-out = cv2.VideoWriter(output_path, fourcc, int(fps), (width, height))
+out = None
+if SAVE_OUTPUT_VIDEO:
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    out = cv2.VideoWriter(OUTPUT_VIDEO_PATH, fourcc, int(fps), (width, height))
+    if not out.isOpened():
+        emit_log(f"Warning: failed to open output video '{OUTPUT_VIDEO_PATH}'. Disabling writer.")
+        out = None
 
 # Create FaceLandmarker options
 base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
@@ -442,15 +511,18 @@ RIGHT_EYE_EAR_INDICES = [362, 385, 387, 263, 373, 380]
 
 # ── Main Loop ──
 frame_count = 0
+frame_reader = LatestFrameReader(cap, queue_size=CAPTURE_QUEUE_SIZE)
+frame_reader.start()
 
 try:
     with vision.FaceLandmarker.create_from_options(options) as landmarker:
-        while cap.isOpened():
-            success, frame = cap.read()
-
-            if not success:
-                emit_log("End of video or cannot read frame")
-                break
+        while True:
+            timestamp_ms, frame = frame_reader.read(timeout=1.0)
+            if frame is None:
+                if frame_reader.stop_event.is_set():
+                    emit_log("Frame reader stopped: camera stream ended.")
+                    break
+                continue
 
             frame_count += 1
 
@@ -458,8 +530,6 @@ try:
                 image_format=mp.ImageFormat.SRGB,
                 data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             )
-
-            timestamp_ms = int(time.time() * 1000)
 
             detection_result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
@@ -592,20 +662,30 @@ try:
                 cv2.putText(annotated_frame, "No Face Detected - Highly Likely Driver Is Asleep", (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-            out.write(annotated_frame)
+            if out is not None:
+                out.write(annotated_frame)
 
-            cv2.imshow('Driver Drowsiness Monitor', annotated_frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+            if DISPLAY_ENABLED:
+                cv2.imshow('Driver Drowsiness Monitor', annotated_frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
 
             if frame_count % 100 == 0:
-                emit_log(f"Processed {frame_count} frames")
+                lag_ms = max(0, int(time.time() * 1000) - timestamp_ms)
+                emit_log(
+                    f"Processed {frame_count} frames | "
+                    f"capture_read={frame_reader.frames_read} dropped={frame_reader.frames_dropped} "
+                    f"lag_ms={lag_ms}"
+                )
 except KeyboardInterrupt:
     emit_log("Interrupted by user", level="warning")
 finally:
+    frame_reader.stop()
     cap.release()
-    out.release()
-    cv2.destroyAllWindows()
+    if out is not None:
+        out.release()
+    if DISPLAY_ENABLED:
+        cv2.destroyAllWindows()
     if ws_broadcaster is not None:
         ws_broadcaster.stop()
     if dispatcher is not None:
