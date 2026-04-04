@@ -13,241 +13,22 @@ import threading
 import urllib.request
 import uuid
 import numpy as np
+
+# Local imports
 from jetson_alert_dispatcher import JetsonAlertDispatcher
-
-
-def utc_timestamp():
-    """Return an RFC3339 UTC timestamp."""
-    return datetime.now(timezone.utc).isoformat()
-
-
-def env_bool(name, default=False):
-    """Parse boolean environment variables."""
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() not in {"0", "false", "no", "off"}
-
-
-def env_int(name, default):
-    """Parse integer environment variables."""
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
-
-
-def env_first(names, default=None):
-    """Return first non-empty environment variable from a list of names."""
-    for name in names:
-        value = os.getenv(name)
-        if value is not None and value != "":
-            return value
-    return default
-
-
-def env_int_first(names, default):
-    """Parse first non-empty integer environment variable from names."""
-    value = env_first(names)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
-
-
-def env_bool_first(names, default=False):
-    """Parse first non-empty boolean environment variable from names."""
-    value = env_first(names)
-    if value is None:
-        return default
-    return value.strip().lower() not in {"0", "false", "no", "off"}
-
-
-class WebSocketBroadcaster:
-    """Broadcast JSON messages to all connected websocket clients."""
-    def __init__(self, host="0.0.0.0", port=8765):
-        self.host = host
-        self.port = port
-        self.clients = set()
-        self.queue = queue.Queue()
-        self.thread = None
-        self.loop = None
-        self._server = None
-        self._running = threading.Event()
-        self._enabled = False
-        self._ws_mod = None
-        self._startup_error = None
-
-    def start(self):
-        """Start websocket server on a background thread."""
-        try:
-            import websockets  # pylint: disable=import-outside-toplevel
-            self._ws_mod = websockets
-        except ImportError:
-            print("WebSocket disabled: install dependency with 'pip install websockets'")
-            return False
-
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
-        self._running.wait(timeout=3.0)
-        if self._startup_error is not None:
-            print(f"WebSocket startup failed: {self._startup_error}")
-        return self._enabled
-
-    def send(self, payload):
-        """Queue a payload for broadcast."""
-        if not self._enabled:
-            return
-        try:
-            self.queue.put_nowait(payload)
-        except queue.Full:
-            pass
-
-    def stop(self):
-        """Stop websocket server and worker loop."""
-        if not self._enabled:
-            return
-        self._enabled = False
-        self.queue.put_nowait(None)
-        if self.loop is not None:
-            self.loop.call_soon_threadsafe(self.loop.stop)
-        if self.thread is not None:
-            self.thread.join(timeout=3.0)
-
-    def _run(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        try:
-            self.loop.run_until_complete(self._serve())
-            self.loop.create_task(self._pump())
-            self._enabled = True
-        except Exception as exc:
-            self._startup_error = exc
-            self._enabled = False
-            self._running.set()
-            self.loop.close()
-            return
-        self._running.set()
-        try:
-            self.loop.run_forever()
-        finally:
-            self._enabled = False
-            if self._server is not None:
-                self._server.close()
-                self.loop.run_until_complete(self._server.wait_closed())
-            tasks = asyncio.all_tasks(self.loop)
-            for task in tasks:
-                task.cancel()
-            if tasks:
-                self.loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
-            self.loop.run_until_complete(self.loop.shutdown_asyncgens())
-            self.loop.close()
-
-    async def _serve(self):
-        async def handler(websocket):
-            self.clients.add(websocket)
-            try:
-                async for _ in websocket:
-                    pass
-            except Exception:
-                pass
-            finally:
-                self.clients.discard(websocket)
-
-        self._server = await self._ws_mod.serve(handler, self.host, self.port)
-        print(f"WebSocket server listening on ws://{self.host}:{self.port}")
-
-    async def _pump(self):
-        while True:
-            item = await asyncio.to_thread(self.queue.get)
-            if item is None:
-                break
-            if not self.clients:
-                continue
-            message = json.dumps(item)
-            stale = []
-            # Iterate over a snapshot; handlers may add/remove clients concurrently.
-            for client in tuple(self.clients):
-                try:
-                    await client.send(message)
-                except Exception:
-                    stale.append(client)
-            for client in stale:
-                self.clients.discard(client)
-
-
-class LatestFrameReader:
-    """Read camera frames on a background thread and keep only the newest frame."""
-
-    def __init__(self, cap, queue_size=1):
-        self.cap = cap
-        self.queue = queue.Queue(maxsize=max(1, queue_size))
-        self.stop_event = threading.Event()
-        self.thread = None
-        self.frames_read = 0
-        self.frames_dropped = 0
-        self.read_failed = False
-
-    def start(self):
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
-
-    def _run(self):
-        while not self.stop_event.is_set():
-            success, frame = self.cap.read()
-            if not success:
-                self.read_failed = True
-                self.stop_event.set()
-                break
-            self.frames_read += 1
-            item = (int(time.time() * 1000), frame)
-            if self.queue.full():
-                try:
-                    self.queue.get_nowait()
-                    self.frames_dropped += 1
-                except queue.Empty:
-                    pass
-            try:
-                self.queue.put_nowait(item)
-            except queue.Full:
-                self.frames_dropped += 1
-
-    def read(self, timeout=1.0):
-        """Return (timestamp_ms, frame) or (None, None) when no frame is available."""
-        try:
-            return self.queue.get(timeout=timeout)
-        except queue.Empty:
-            return None, None
-
-    def stop(self):
-        self.stop_event.set()
-        if self.thread is not None:
-            self.thread.join(timeout=2.0)
-
+from module_web_socket import *
+from module_model_downloader import *
+from module_face_landmarker import *
+from module_env_init import *
+from module_latest_frame_reader import *
 
 # Model download setup
 MODEL_DIR = "../model/facenet_vpruned_quantized_v2.0.1"
 MODEL_PATH = os.path.join(MODEL_DIR, "face_landmarker.task")
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
-
-def download_model(url, path):
-    """Download model if not exists"""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    if not os.path.exists(path):
-        print(f"Downloading {os.path.basename(path)} (~5MB)...")
-        urllib.request.urlretrieve(url, path)
-        print("Download complete!")
-    else:
-        print(f"Model found at {path}")
-
-# Download/check model
 download_model(MODEL_URL, MODEL_PATH)
 
+# ── Video Parameters ──
 VIDEO_SOURCE = 0
 CAMERA_BUFFER_SIZE = max(1, env_int("MP_CAMERA_BUFFER_SIZE", 1))
 CAMERA_TARGET_FPS = env_int("MP_CAMERA_TARGET_FPS", 30)
@@ -268,6 +49,9 @@ WS_PORT = env_int("MP_WS_PORT", 8765)
 
 # ── MQTT Uplink Parameters (primary integration path) ──
 MQTT_ENABLED = env_bool_first(["MP_MQTT_ENABLED", "MP_QTT_ENABLED", "MPMQTT_ENABLED", "MPQTT_ENABLED"], True)
+
+# ── BLE Direct-to-Driver Parameters ──
+BLE_ENABLED = env_bool("MP_BLE_ENABLED", True)
 
 # ── EAR (Eye Aspect Ratio) Parameters ──
 EAR_THRESHOLD = 0.21          # Below this = eyes closed (lowered for better sensitivity)
@@ -320,7 +104,18 @@ if MQTT_ENABLED:
     if not dispatcher.connect():
         dispatcher = None
 
-if not event_sinks and dispatcher is None:
+# ── BLE notifier (direct-to-driver alerts) ──
+ble_notifier = None
+if BLE_ENABLED:
+    try:
+        from ble_notifier import BLENotifier
+        ble_notifier = BLENotifier()
+        ble_notifier.start()
+    except Exception as e:
+        print(f"BLE disabled: {e}")
+        ble_notifier = None
+
+if not event_sinks and dispatcher is None and ble_notifier is None:
     print("Warning: no event sink enabled. Alerts will not be forwarded.")
 
 
@@ -369,15 +164,19 @@ def emit_alert(code, message, severity="warning", **data):
     if data:
         payload["data"] = data
     emit_event("alert", **payload)
+    level = severity_to_level(severity)
     if dispatcher is not None:
         metadata = {"code": code, "severity": severity}
         metadata.update(data)
         ok = dispatcher.publish_alert(
-            level=severity_to_level(severity),
+            level=level,
             message=message,
             metadata=metadata,
         )
         emit_log(f"MQTT publish ok={ok} code={code} message={message}")
+    if ble_notifier is not None:
+        ble_notifier.send_alert(level, message)
+        emit_log(f"BLE alert sent code={code}")
 
 
 cap = cv2.VideoCapture(VIDEO_SOURCE)
@@ -426,88 +225,6 @@ options = vision.FaceLandmarkerOptions(
     min_tracking_confidence=0.5
 )
 
-
-def calculate_ear(face_landmarks, indices, image_shape):
-    """
-    Calculate Eye Aspect Ratio (EAR).
-    Uses 6 landmark points: 2 corner + 4 vertical.
-    """
-    def get_coords(idx):
-        return (face_landmarks[idx].x * image_shape[1],
-                face_landmarks[idx].y * image_shape[0])
-
-    p1 = get_coords(indices[0])  # left corner
-    p2 = get_coords(indices[1])  # top-1
-    p3 = get_coords(indices[2])  # top-2
-    p4 = get_coords(indices[3])  # right corner
-    p5 = get_coords(indices[4])  # bottom-2
-    p6 = get_coords(indices[5])  # bottom-1
-
-    v1 = math.hypot(p2[0] - p6[0], p2[1] - p6[1])
-    v2 = math.hypot(p3[0] - p5[0], p3[1] - p5[1])
-    h  = math.hypot(p1[0] - p4[0], p1[1] - p4[1])
-
-    if h == 0:
-        return 0.0
-    return (v1 + v2) / (2.0 * h)
-
-
-def get_head_vertical_position(face_landmarks):
-    """
-    Get a normalized vertical position of the head using the nose tip (landmark 1).
-    Returns the raw normalized y coordinate (0=top, 1=bottom).
-    We use the nose tip relative to the face bounding box to be scale-invariant.
-    """
-    # Nose tip
-    nose_y = face_landmarks[1].y
-
-    # Use forehead (10) and chin (152) to normalize within the face
-    forehead_y = face_landmarks[10].y
-    chin_y = face_landmarks[152].y
-    face_height = abs(chin_y - forehead_y)
-
-    if face_height < 0.001:
-        return nose_y  # fallback
-
-    # Nose position relative to forehead-chin range
-    # 0 = at forehead level, 1 = at chin level
-    # When head tilts down, nose_y increases relative to forehead
-    relative_y = (nose_y - forehead_y) / face_height
-    return relative_y
-
-
-def draw_landmarks_on_image(image, detection_result):
-    """Draw face landmarks on the image"""
-    if not detection_result.face_landmarks:
-        return image
-
-    annotated_image = image.copy()
-
-    for face_landmarks in detection_result.face_landmarks:
-        for landmark in face_landmarks:
-            x = int(landmark.x * image.shape[1])
-            y = int(landmark.y * image.shape[0])
-            cv2.circle(annotated_image, (x, y), 1, (0, 255, 0), -1)
-
-        left_eye_indices = [33, 160, 158, 133, 153, 144, 33]
-        right_eye_indices = [362, 385, 387, 263, 373, 380, 362]
-
-        for eye_indices in [left_eye_indices, right_eye_indices]:
-            for i in range(len(eye_indices) - 1):
-                pt1 = face_landmarks[eye_indices[i]]
-                pt2 = face_landmarks[eye_indices[i + 1]]
-                x1 = int(pt1.x * image.shape[1])
-                y1 = int(pt1.y * image.shape[0])
-                x2 = int(pt2.x * image.shape[1])
-                y2 = int(pt2.y * image.shape[0])
-                cv2.line(annotated_image, (x1, y1), (x2, y2), (255, 0, 0), 1)
-
-    return annotated_image
-
-
-# MediaPipe landmark indices for EAR
-LEFT_EYE_EAR_INDICES  = [33, 160, 158, 133, 153, 144]
-RIGHT_EYE_EAR_INDICES = [362, 385, 387, 263, 373, 380]
 
 # ── Main Loop ──
 frame_count = 0
@@ -690,6 +407,8 @@ finally:
         ws_broadcaster.stop()
     if dispatcher is not None:
         dispatcher.close()
+    if ble_notifier is not None:
+        ble_notifier.stop()
 
 emit_log(f"\n{'='*50}")
 emit_log(f"Processing complete! Total frames: {frame_count}")
