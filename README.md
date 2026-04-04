@@ -28,7 +28,16 @@ No frame stream is sent by this script.
   - `paho-mqtt`
   - `websockets` (optional, only if enabling local WS output)
 
-## Setup
+## Automatic Setup
+An easy way to run the model is through the `model_initializer.sh` script
+
+```
+./model_initializer.sh
+```
+
+This script sets up the environment and runs the `face_detect_mediapipe.py` script on its own
+
+## Manual Setup
 
 ```bash
 python3 -m venv venv
