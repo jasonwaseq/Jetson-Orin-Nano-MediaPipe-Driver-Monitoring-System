@@ -275,6 +275,8 @@ try:
                                     emit_alert(
                                         "head_inattention_detected",
                                         message,
+                                        dispatcher,
+                                        ble_notifier,
                                         severity="high",
                                         event_count=HEAD_INATTENTION_COUNT,
                                         deviation=round(deviation, 4),
