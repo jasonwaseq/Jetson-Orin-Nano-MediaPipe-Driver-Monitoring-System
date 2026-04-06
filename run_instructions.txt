@@ -6,6 +6,9 @@ Run this exact block:
 
   export MP_SOURCE_ID='jetson-01'
   export MP_MQTT_ENABLED='true'
+  export MP_VIDEO_SOURCE='/dev/video0'
+  export MP_CAMERA_BACKEND='v4l2'
+  export MP_CAMERA_FOURCC='MJPG'
 
   # canonical values
   export MP_MQTT_HOST='73797b78ceac47e998c30ac034930c26.s1.eu.hivemq.cloud'

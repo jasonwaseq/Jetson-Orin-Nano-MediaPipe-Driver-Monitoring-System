@@ -1,3 +1,4 @@
+export MP_MQTT_HOST='73797b78ceac47e998c30ac034930c26.s1.eu.hivemq.cloud'
 export MP_MQTT_PORT='8883'
 export MP_MQTT_TLS='true'
 export MP_MQTT_USERNAME='group7'
