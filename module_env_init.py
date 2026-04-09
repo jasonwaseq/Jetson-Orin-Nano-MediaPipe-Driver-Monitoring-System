@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 
 def utc_timestamp():
     """Return an RFC3339 UTC timestamp."""
@@ -50,4 +51,3 @@ def env_bool_first(names, default=False):
     if value is None:
         return default
     return value.strip().lower() not in {"0", "false", "no", "off"}
-

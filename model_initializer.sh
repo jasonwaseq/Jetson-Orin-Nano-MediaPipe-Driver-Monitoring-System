@@ -6,6 +6,25 @@ export MP_MQTT_PASSWORD='group7BananaSlug'
 export MP_MQTT_CLIENT_ID='uplink-jetson-01'
 export MP_QTT_HEARTBEAT_SECONDS='10'
 
+# IMU speeding-alert monitor
+export MP_IMU_ENABLED='true'
+export MP_IMU_I2C_BUS='7'
+export MP_IMU_ADDRESS='0x28'
+export MP_IMU_USE_LINEAR_ACCELERATION='true'
+export MP_IMU_AXIS='magnitude'
+export MP_IMU_SPEED_THRESHOLD_MPS2='2.5'
+export MP_IMU_SUSTAIN_SECONDS='0.5'
+export MP_IMU_ALERT_COOLDOWN_SECONDS='8.0'
+export MP_IMU_SMOOTHING_ALPHA='0.2'
+
+# Audio alert amp + speaker
+export MP_AUDIO_ENABLED='true'
+export MP_AUDIO_TONE_PIN='15'
+export MP_AUDIO_SHUTDOWN_PIN='29'
+export MP_AUDIO_ALERT_CODES='drowsiness_detected,head_inattention_detected'
+export MP_AUDIO_DEFAULT_FREQUENCY_HZ='880'
+export MP_AUDIO_PREFER_PWM='true'
+
 # mirror into alternate env name families
 export MP_QTT_HOST="$MP_MQTT_HOST"
 export MP_QTT_PORT="$MP_MQTT_PORT"
