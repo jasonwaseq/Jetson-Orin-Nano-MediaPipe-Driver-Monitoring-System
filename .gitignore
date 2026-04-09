@@ -51,3 +51,8 @@ network_notes.*
 deploy_notes.*
 
 .txt
+
+# CUDA/TensorRT build artifacts
+convert_env/
+trt_cache/
+test_video.mp4

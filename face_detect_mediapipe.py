@@ -31,7 +31,10 @@ MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/fac
 download_model(MODEL_URL, MODEL_PATH)
 
 # ── Video Parameters ──
-VIDEO_SOURCE = 0
+try:
+    VIDEO_SOURCE = int(os.environ.get("MP_VIDEO_SOURCE", "0"))
+except ValueError:
+    VIDEO_SOURCE = os.environ.get("MP_VIDEO_SOURCE")
 CAMERA_BUFFER_SIZE = max(1, env_int("MP_CAMERA_BUFFER_SIZE", 1))
 CAMERA_TARGET_FPS = env_int("MP_CAMERA_TARGET_FPS", 30)
 CAPTURE_QUEUE_SIZE = max(1, env_int("MP_CAPTURE_QUEUE_SIZE", 1))
@@ -397,7 +400,7 @@ try:
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
 
-            if frame_count % 100 == 0:
+            if frame_count % 10 == 0:
                 lag_ms = max(0, int(time.time() * 1000) - timestamp_ms)
                 pp_stats = gpu_preprocessor.stats()
                 router.emit_log(
