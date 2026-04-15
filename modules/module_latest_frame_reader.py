@@ -19,12 +19,20 @@ class LatestFrameReader:
         self.thread.start()
 
     def _run(self):
+        consecutive_failed_reads = 0
         while not self.stop_event.is_set():
             success, frame = self.cap.read()
             if not success:
-                self.read_failed = True
-                self.stop_event.set()
-                break
+                consecutive_failed_reads += 1
+                time.sleep(0.01)
+                # On Mac/Linux, camera might need a few frames to warm up
+                if consecutive_failed_reads > 30:
+                    self.read_failed = True
+                    self.stop_event.set()
+                    break
+                continue
+            
+            consecutive_failed_reads = 0
             self.frames_read += 1
             item = (int(time.time() * 1000), frame)
             if self.queue.full():
@@ -49,3 +57,36 @@ class LatestFrameReader:
         self.stop_event.set()
         if self.thread is not None:
             self.thread.join(timeout=2.0)
+
+class SynchronousFrameReader:
+    """Read frames synchronously from a video file. Does not drop frames."""
+    def __init__(self, cap):
+        self.cap = cap
+        self.frames_read = 0
+        self.frames_dropped = 0
+        self.stop_event = threading.Event()
+        self.fps = cap.get(3) or 30 # cv2.CAP_PROP_FPS is 5
+
+    def start(self):
+        # No background thread needed for synchronous reading
+        pass
+
+    def read(self, timeout=1.0):
+        if self.stop_event.is_set():
+            return None, None
+            
+        import cv2
+        fps = self.cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0: fps = 30
+            
+        success, frame = self.cap.read()
+        if not success:
+            self.stop_event.set()
+            return None, None
+            
+        self.frames_read += 1
+        timestamp_ms = int((self.frames_read * 1000) / fps)
+        return timestamp_ms, frame
+
+    def stop(self):
+        self.stop_event.set()

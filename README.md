@@ -22,7 +22,7 @@ No frame stream is sent by this script.
 - `module_bno055.py`: dependency-free Linux I2C BNO055 driver for the Jetson
 - `module_imu_speed_monitor.py`: background IMU polling and speeding-alert logic
 - `module_audio_alert.py`: GPIO-driven audio alert notifier for the amp breakout
-- `audio_alert_debug.py`: standalone audio alert tone test
+- `tests/audio_alert_debug.py`: standalone audio alert tone test
 - `imu_bno055_debug.py`: standalone IMU bring-up/debug script
 
 ## Requirements
@@ -71,8 +71,8 @@ Use these free `J12` header pins because the IMU is already using `1/3/5/6`.
 | --- | --- | --- |
 | `VCC` | `Pin 2` (`5V`) | Better output headroom for the amp than 3.3V |
 | `GND` | `Pin 9` (`GND`) | Common ground |
-| `IN+` | `Pin 15` (`GPIO27 / PWM-capable`) | Hardware PWM tone signal on this Jetson image |
-| `IN-` | `Pin 14` (`GND`) | Separate ground pin for single-ended input reference |
+| `IN+` | `Pin 15` (`GPIO27 / PWM-capable`) | Audio input from the Jetson; use this as the signal input |
+| `IN-` | `Pin 14` (`GND`) | Ground reference for the amp input |
 | `SHDN` | `Pin 29` (`GPIO01`) | Software mute / enable control |
 | `OUT+` / `SPK+` | Speaker wire 1 | Connect directly to one speaker terminal |
 | `OUT-` / `SPK-` | Speaker wire 2 | Connect directly to the other speaker terminal |
@@ -85,14 +85,20 @@ Speaker notes:
 
 Amp notes:
 
-- The TPA2005D1 accepts a ground-referenced input, so `IN-` can be tied to `GND` while the Jetson drives `IN+`.
+- The TPA2005D1 accepts a ground-referenced input, so `IN-` should be tied to `GND` while the Jetson drives `IN+`.
 - `SHDN` is active low on the amplifier. This repo drives the Jetson GPIO high to enable the amp only while playing an alert.
 - This path is intended for simple alert tones, not high-fidelity audio playback.
 
 If you need to validate the amp path by itself:
 
 ```bash
-./venv/bin/python audio_alert_debug.py
+PYTHONPATH=. ./venv/bin/python tests/audio_alert_debug.py
+```
+
+To probe the pins while holding the amp enabled:
+
+```bash
+PYTHONPATH=. ./venv/bin/python tests/audio_alert_debug.py --probe-pins --continuous-seconds 5 --frequency-hz 440
 ```
 
 ## Automatic Setup
@@ -212,6 +218,10 @@ sleepydrive/alerts/+
 - `MP_AUDIO_PREFER_PWM` (default: `1`)
 - `MP_AUDIO_SHUTDOWN_ACTIVE_HIGH` (default: `1`)
 - `MP_AUDIO_STARTUP_MUTED` (default: `1`)
+- `MP_AUDIO_FORCE_GPIO` (default: `0`)
+- `MP_AUDIO_OUTPUT_MODE` (default: `pdm_gpio`)
+- `MP_AUDIO_PWM_CARRIER_HZ` (default: `25000`)
+- `MP_AUDIO_PWM_STEP_HZ` (default: `1000`)
 
 Required Jetson permissions:
 

@@ -1,4 +1,5 @@
 import os
+import urllib.request
 
 def download_model(url, path):
     """Download model if not exists"""

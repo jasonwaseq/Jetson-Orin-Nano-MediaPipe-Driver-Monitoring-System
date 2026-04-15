@@ -1,7 +1,7 @@
 import threading
 import uuid
 
-from module_env_init import utc_timestamp
+from modules.module_env_init import utc_timestamp
 
 
 def severity_to_level(severity):

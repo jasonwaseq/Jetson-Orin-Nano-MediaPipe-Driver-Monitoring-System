@@ -3,9 +3,11 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import os
-from pathlib import Path
 import time
 import numpy as np
+
+import sys
+from pathlib import Path
 
 # Local imports
 from modules.jetson_alert_dispatcher import JetsonAlertDispatcher
@@ -21,12 +23,12 @@ from modules.module_face_landmarker import (
 from modules.module_env_init import env_bool, env_bool_first, env_int
 from modules.module_gpu_preprocessor import CUDA_AVAILABLE, CUDA_INFO, GpuPreprocessor
 from modules.module_imu_speed_monitor import IMUSpeedMonitor, IMUSpeedMonitorConfig
-from modules.module_latest_frame_reader import LatestFrameReader
+from modules.module_latest_frame_reader import LatestFrameReader, SynchronousFrameReader
 from modules.module_model_downloader import download_model
 from modules.module_web_socket import WebSocketBroadcaster
 
 # Model download setup
-MODEL_DIR = "../model/facenet_vpruned_quantized_v2.0.1"
+MODEL_DIR = "model/facenet_vpruned_quantized_v2.0.1"
 MODEL_PATH = os.path.join(MODEL_DIR, "face_landmarker.task")
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
 download_model(MODEL_URL, MODEL_PATH)
@@ -165,48 +167,9 @@ if not sinks and dispatcher is None and ble_notifier is None:
     router.emit_log("Warning: no event sink enabled. Alerts will not be forwarded.")
 
 
-def _video_sources_to_try(source):
-    if isinstance(source, int):
-        yield source
-        for index in range(10):
-            if index != source:
-                yield index
-        return
+cap = cv2.VideoCapture(VIDEO_SOURCE)
 
-    yield source
-
-
-def _open_camera_source(source, attempts=25, delay_s=0.2):
-    for attempt in range(1, attempts + 1):
-        for candidate in _video_sources_to_try(source):
-            cap = cv2.VideoCapture(candidate, cv2.CAP_V4L2)
-            if cap.isOpened():
-                # Make sure the device is actually producing frames, not just opening.
-                success, _frame = cap.read()
-                if success:
-                    router.emit_log(
-                        f"Camera opened on source {candidate!r} after attempt {attempt}/{attempts}"
-                    )
-                    return cap
-            cap.release()
-        time.sleep(delay_s)
-
-    # Final fallback: scan all local V4L2 nodes that may have appeared late.
-    for device in sorted(Path("/dev").glob("video*")):
-        cap = cv2.VideoCapture(str(device), cv2.CAP_V4L2)
-        if cap.isOpened():
-            success, _frame = cap.read()
-            if success:
-                router.emit_log(f"Camera opened on fallback device {device}")
-                return cap
-        cap.release()
-
-    return None
-
-
-cap = _open_camera_source(VIDEO_SOURCE)
-
-if cap is None or not cap.isOpened():
+if not cap.isOpened():
     router.emit_log(f"Error: Could not open video source {VIDEO_SOURCE}", level="error")
     exit()
 
@@ -231,8 +194,9 @@ router.emit_log(
 router.emit_log(f"Using model: {MODEL_PATH}")
 
 # ── GPU Preprocessor ──
+# ── Force CUDA Preprocessing for V2 ──
 gpu_preprocessor = GpuPreprocessor(use_gpu=CUDA_AVAILABLE)
-cpu_preprocessor = GpuPreprocessor(use_gpu=False)  # always-CPU for benchmarking
+cpu_preprocessor = GpuPreprocessor(use_gpu=False)
 
 if CUDA_AVAILABLE:
     router.emit_log(
@@ -251,7 +215,7 @@ if BENCHMARK_MODE:
         f"every {BENCHMARK_INTERVAL} frames"
     )
 
-# Setup output video
+# Setup output videos
 out = None
 if SAVE_OUTPUT_VIDEO:
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -259,6 +223,13 @@ if SAVE_OUTPUT_VIDEO:
     if not out.isOpened():
         router.emit_log(f"Warning: failed to open output video '{OUTPUT_VIDEO_PATH}'. Disabling writer.")
         out = None
+
+# Always record raw video for cross-model testing
+recordings_dir = str(Path(__file__).parent / "recordings")
+os.makedirs(recordings_dir, exist_ok=True)
+raw_video_path = os.path.join(recordings_dir, f"session_{Path(__file__).stem}_{int(time.time())}.mp4")
+raw_out = cv2.VideoWriter(raw_video_path, cv2.VideoWriter_fourcc(*"mp4v"), int(fps), (width, height))
+router.emit_log(f"Recording RAW session video to {raw_video_path}")
 
 # Create FaceLandmarker options
 base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
@@ -274,7 +245,12 @@ options = vision.FaceLandmarkerOptions(
 
 # ── Main Loop ──
 frame_count = 0
-frame_reader = LatestFrameReader(cap, queue_size=CAPTURE_QUEUE_SIZE)
+if isinstance(VIDEO_SOURCE, str):
+    router.emit_log("Using SynchronousFrameReader for video file analysis")
+    frame_reader = SynchronousFrameReader(cap)
+else:
+    router.emit_log("Using LatestFrameReader for live camera feed")
+    frame_reader = LatestFrameReader(cap, queue_size=CAPTURE_QUEUE_SIZE)
 frame_reader.start()
 
 try:
@@ -288,6 +264,10 @@ try:
                 continue
 
             frame_count += 1
+            
+            # Save raw unmodified frame to persistent storage
+            if raw_out and raw_out.isOpened():
+                raw_out.write(frame)
 
             # ── Preprocessing (GPU-accelerated when available) ──
             rgb_frame = gpu_preprocessor.bgr_to_rgb(frame)
@@ -456,6 +436,8 @@ finally:
     cap.release()
     if out is not None:
         out.release()
+    if raw_out is not None:
+        raw_out.release()
     if DISPLAY_ENABLED:
         cv2.destroyAllWindows()
     if imu_monitor is not None:

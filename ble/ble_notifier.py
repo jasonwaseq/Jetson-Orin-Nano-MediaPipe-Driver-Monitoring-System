@@ -27,7 +27,7 @@ import dbus.mainloop.glib
 import dbus.service
 from gi.repository import GLib
 
-import config as cfg
+from ble import config as cfg
 
 log = logging.getLogger("ble")
 

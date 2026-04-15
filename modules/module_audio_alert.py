@@ -1,11 +1,18 @@
 import os
 import queue
+import math
 import sys
 import threading
 import time
 from dataclasses import dataclass
 
-from module_env_init import env_bool, env_int
+from modules.module_env_init import env_bool, env_int
+
+BOARD_TONE_PIN = 15
+BOARD_SHUTDOWN_PIN = 29
+DEFAULT_AUDIO_FREQUENCY_HZ = 880
+DEFAULT_PWM_CARRIER_HZ = 25000
+DEFAULT_PWM_STEP_HZ = 1000
 
 
 def _import_gpio():
@@ -125,14 +132,18 @@ class _SysfsPWM:
 @dataclass(frozen=True)
 class AudioAlertConfig:
     enabled: bool = False
-    tone_pin: int = 15
-    shutdown_pin: int = 29
-    default_frequency_hz: int = 880
+    tone_pin: int = BOARD_TONE_PIN
+    shutdown_pin: int = BOARD_SHUTDOWN_PIN
+    default_frequency_hz: int = DEFAULT_AUDIO_FREQUENCY_HZ
     allowed_codes: tuple[str, ...] = ("drowsiness_detected", "head_inattention_detected")
     queue_size: int = 8
     enabled_high: bool = True
     startup_muted: bool = True
     prefer_pwm: bool = True
+    force_gpio: bool = False
+    audio_output_mode: str = "pdm_gpio"
+    pwm_carrier_hz: int = DEFAULT_PWM_CARRIER_HZ
+    pwm_step_hz: int = DEFAULT_PWM_STEP_HZ
 
     @classmethod
     def from_env(cls):
@@ -145,14 +156,18 @@ class AudioAlertConfig:
         )
         return cls(
             enabled=env_bool("MP_AUDIO_ENABLED", False),
-            tone_pin=env_int("MP_AUDIO_TONE_PIN", 15),
-            shutdown_pin=env_int("MP_AUDIO_SHUTDOWN_PIN", 29),
-            default_frequency_hz=max(200, env_int("MP_AUDIO_DEFAULT_FREQUENCY_HZ", 880)),
+            tone_pin=env_int("MP_AUDIO_TONE_PIN", BOARD_TONE_PIN),
+            shutdown_pin=env_int("MP_AUDIO_SHUTDOWN_PIN", BOARD_SHUTDOWN_PIN),
+            default_frequency_hz=max(200, env_int("MP_AUDIO_DEFAULT_FREQUENCY_HZ", DEFAULT_AUDIO_FREQUENCY_HZ)),
             allowed_codes=allowed_codes or ("drowsiness_detected", "head_inattention_detected"),
             queue_size=max(1, env_int("MP_AUDIO_QUEUE_SIZE", 8)),
             enabled_high=env_bool("MP_AUDIO_SHUTDOWN_ACTIVE_HIGH", True),
             startup_muted=env_bool("MP_AUDIO_STARTUP_MUTED", True),
             prefer_pwm=env_bool("MP_AUDIO_PREFER_PWM", True),
+            force_gpio=env_bool("MP_AUDIO_FORCE_GPIO", False),
+            audio_output_mode=os.getenv("MP_AUDIO_OUTPUT_MODE", "pdm_gpio").strip().lower(),
+            pwm_carrier_hz=max(1000, env_int("MP_AUDIO_PWM_CARRIER_HZ", DEFAULT_PWM_CARRIER_HZ)),
+            pwm_step_hz=max(50, env_int("MP_AUDIO_PWM_STEP_HZ", DEFAULT_PWM_STEP_HZ)),
         )
 
 
@@ -195,7 +210,14 @@ class AudioAlertNotifier:
             "Audio alert notifier started "
             f"tone_pin={self.config.tone_pin} shutdown_pin={self.config.shutdown_pin} "
             f"codes={','.join(self.config.allowed_codes)} "
-            f"mode={'pwm' if self._use_pwm else 'gpio'}"
+            f"mode={'pwm' if self._use_pwm else 'gpio'} "
+            f"audio_output_mode={self.config.audio_output_mode}"
+        )
+        self.router.emit_log(
+            "Audio wiring map: "
+            f"BOARD 15 -> amp audio input, "
+            f"BOARD 29 -> TPA2005D1 SHDN, "
+            f"BOARD 2 -> 5V, BOARD 9 -> GND"
         )
         return True
 
@@ -237,12 +259,51 @@ class AudioAlertNotifier:
 
         frequency_hz = int(frequency_hz or self.config.default_frequency_hz)
         duration_s = max(0.05, float(duration_s))
+        self.router.emit_log(
+            f"Audio test tone starting freq={frequency_hz}Hz duration={duration_s:.2f}s "
+            f"tone_pin={self.config.tone_pin} shutdown_pin={self.config.shutdown_pin}"
+        )
         self._set_shutdown(True)
         time.sleep(0.02)
         try:
             self._tone(frequency_hz, duration_s)
         finally:
             self._silence()
+        return True
+
+    def probe_pins(self, duration_s=5.0, tone_frequency_hz=None):
+        if not self._enabled:
+            return False
+
+        duration_s = max(0.05, float(duration_s))
+        tone_frequency_hz = int(tone_frequency_hz or self.config.default_frequency_hz)
+        self.router.emit_log(
+            f"Audio pin probe starting duration={duration_s:.2f}s "
+            f"freq={tone_frequency_hz}Hz mode={'pwm' if self._use_pwm else 'gpio'}"
+        )
+        self._set_shutdown(True)
+        self.router.emit_log("Audio pin probe: SHDN held enabled")
+        try:
+            if self._use_pwm:
+                self.router.emit_log("Audio pin probe: starting PWM carrier")
+                self._pwm.ChangeFrequency(tone_frequency_hz)
+                self._pwm.start(50.0)
+                self._sleep_interruptibly(duration_s)
+                self._pwm.ChangeDutyCycle(0.0)
+                self._pwm.stop()
+            else:
+                half_period = 0.5 / float(tone_frequency_hz)
+                end_time = time.perf_counter() + duration_s
+                while time.perf_counter() < end_time and not self._stop_event.is_set():
+                    self._gpio.output(self.config.tone_pin, self._gpio.HIGH)
+                    self.router.emit_log("Audio pin probe: tone HIGH")
+                    self._busy_sleep(half_period)
+                    self._gpio.output(self.config.tone_pin, self._gpio.LOW)
+                    self.router.emit_log("Audio pin probe: tone LOW")
+                    self._busy_sleep(half_period)
+        finally:
+            self._silence()
+            self.router.emit_log("Audio pin probe complete")
         return True
 
     def _worker(self):
@@ -293,13 +354,25 @@ class AudioAlertNotifier:
 
     def _tone(self, frequency_hz, duration_s):
         if self._use_pwm:
-            self._pwm.ChangeFrequency(int(frequency_hz))
-            self._pwm.start(50.0)
-            self._sleep_interruptibly(duration_s)
-            self._pwm.ChangeDutyCycle(0.0)
-            self._pwm.stop()
+            if self.config.audio_output_mode == "carrier_pwm":
+                self.router.emit_log(
+                    "Audio tone using carrier PWM "
+                    f"on BOARD pin {self.config.tone_pin} carrier={self.config.pwm_carrier_hz}Hz"
+                )
+                self._tone_with_carrier_pwm(frequency_hz, duration_s)
+            elif self.config.audio_output_mode == "pdm_gpio":
+                self.router.emit_log(f"Audio tone using PDM GPIO on BOARD pin {self.config.tone_pin}")
+                self._tone_with_pdm_gpio(frequency_hz, duration_s)
+            else:
+                self.router.emit_log(f"Audio tone using PWM on BOARD pin {self.config.tone_pin}")
+                self._pwm.ChangeFrequency(int(frequency_hz))
+                self._pwm.start(50.0)
+                self._sleep_interruptibly(duration_s)
+                self._pwm.ChangeDutyCycle(0.0)
+                self._pwm.stop()
             return
 
+        self.router.emit_log(f"Audio tone using GPIO on BOARD pin {self.config.tone_pin}")
         half_period = 0.5 / float(frequency_hz)
         end_time = time.perf_counter() + float(duration_s)
         while time.perf_counter() < end_time and not self._stop_event.is_set():
@@ -313,10 +386,57 @@ class AudioAlertNotifier:
         while time.perf_counter() < target:
             pass
 
+    def _tone_with_carrier_pwm(self, frequency_hz, duration_s):
+        carrier_hz = int(self.config.pwm_carrier_hz)
+        step_hz = int(self.config.pwm_step_hz)
+        step_s = 1.0 / float(step_hz)
+        carrier_period_s = 1.0 / float(carrier_hz)
+        if self._pwm is None:
+            raise RuntimeError("Carrier PWM requested but PWM channel is unavailable")
+
+        self._pwm.ChangeFrequency(carrier_hz)
+        self._pwm.start(50.0)
+        start = time.perf_counter()
+        phase = 0.0
+        phase_step = 2.0 * math.pi * float(frequency_hz) / float(step_hz)
+        while (time.perf_counter() - start) < float(duration_s) and not self._stop_event.is_set():
+            duty = 50.0 + 45.0 * math.sin(phase)
+            self._pwm.ChangeDutyCycle(duty)
+            phase += phase_step
+            time.sleep(step_s)
+        self._pwm.ChangeDutyCycle(0.0)
+        self._pwm.stop()
+
+    def _tone_with_pdm_gpio(self, frequency_hz, duration_s):
+        # Generate a sigma-delta style 1-bit stream. This is still GPIO, but it
+        # produces a much more audio-like waveform than a raw square wave.
+        sample_hz = int(self.config.pwm_step_hz)
+        sample_s = 1.0 / float(sample_hz)
+        samples = max(1, int(float(duration_s) * sample_hz))
+        phase = 0.0
+        phase_step = 2.0 * math.pi * float(frequency_hz) / float(sample_hz)
+        acc = 0.0
+        self._gpio.setup(self.config.tone_pin, self._gpio.OUT, initial=self._gpio.LOW)
+        for _ in range(samples):
+            if self._stop_event.is_set():
+                break
+            target = 0.5 + 0.48 * math.sin(phase)
+            acc += target - 0.5
+            out = acc >= 0.0
+            self._gpio.output(self.config.tone_pin, self._gpio.HIGH if out else self._gpio.LOW)
+            acc -= 0.5 if out else -0.5
+            phase += phase_step
+            time.sleep(sample_s)
+        self._gpio.output(self.config.tone_pin, self._gpio.LOW)
+
     def _sleep_interruptibly(self, seconds):
         self._stop_event.wait(max(0.0, seconds))
 
     def _set_shutdown(self, enabled):
+        self.router.emit_log(
+            f"Audio amp SHDN -> {'HIGH' if self._shutdown_level(enabled) == self._gpio.HIGH else 'LOW'} "
+            f"(enabled={enabled})"
+        )
         self._gpio.output(self.config.shutdown_pin, self._shutdown_level(enabled=enabled))
 
     def _shutdown_level(self, enabled):
@@ -341,6 +461,12 @@ class AudioAlertNotifier:
             pass
 
     def _setup_tone_output(self):
+        if self.config.force_gpio:
+            self._pwm = None
+            self._use_pwm = False
+            self._gpio.setup(self.config.tone_pin, self._gpio.OUT, initial=self._gpio.LOW)
+            return
+
         if self.config.prefer_pwm:
             try:
                 self._pwm = _SysfsPWM.from_board_pin(

@@ -4,8 +4,8 @@ import threading
 import time
 from dataclasses import dataclass
 
-from module_bno055 import BNO055, BNO055_DEFAULT_ADDRESS, BNO055Error
-from module_env_init import env_bool, env_int
+from modules.module_bno055 import BNO055, BNO055_DEFAULT_ADDRESS, BNO055Error
+from modules.module_env_init import env_bool, env_int
 
 
 def _env_float(name, default):
