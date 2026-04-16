@@ -1,6 +1,7 @@
 import os
 import queue
 import math
+import random
 import sys
 import threading
 import time
@@ -9,10 +10,13 @@ from dataclasses import dataclass
 from modules.module_env_init import env_bool, env_int
 
 BOARD_TONE_PIN = 15
+BOARD_ALT_PWM_PIN = 13
 BOARD_SHUTDOWN_PIN = 29
 DEFAULT_AUDIO_FREQUENCY_HZ = 880
 DEFAULT_PWM_CARRIER_HZ = 25000
 DEFAULT_PWM_STEP_HZ = 1000
+DEFAULT_PWM_NOISE_MIN_HZ = 220
+DEFAULT_PWM_NOISE_MAX_HZ = 4000
 
 
 def _import_gpio():
@@ -83,17 +87,38 @@ class _SysfsPWM:
         was_started = self._started
         if was_started:
             self.stop()
+            time.sleep(0.02)
         self._frequency_hz = frequency_hz
-        self._set_period(frequency_hz)
+        try:
+            self._write("duty_cycle", "0")
+            self._set_period(frequency_hz)
+        except OSError:
+            if was_started:
+                self.stop()
+                time.sleep(0.05)
+                self._write("duty_cycle", "0")
+                self._set_period(frequency_hz)
+            else:
+                raise
         self.ChangeDutyCycle(self._duty_cycle_percent)
         if was_started:
+            time.sleep(0.01)
             self.start(self._duty_cycle_percent)
 
     def ChangeDutyCycle(self, duty_cycle_percent):
         duty_cycle_percent = max(0.0, min(100.0, float(duty_cycle_percent)))
         self._duty_cycle_percent = duty_cycle_percent
         duty_ns = int(self._period_ns * (duty_cycle_percent / 100.0))
-        self._write("duty_cycle", str(duty_ns))
+        try:
+            self._write("duty_cycle", str(duty_ns))
+        except OSError:
+            if self._started:
+                self.stop()
+                time.sleep(0.05)
+                self._write("duty_cycle", "0")
+                self._write("duty_cycle", str(duty_ns))
+            else:
+                raise
 
     def cleanup(self):
         try:
@@ -133,6 +158,7 @@ class _SysfsPWM:
 class AudioAlertConfig:
     enabled: bool = False
     tone_pin: int = BOARD_TONE_PIN
+    alt_tone_pin: int = BOARD_ALT_PWM_PIN
     shutdown_pin: int = BOARD_SHUTDOWN_PIN
     default_frequency_hz: int = DEFAULT_AUDIO_FREQUENCY_HZ
     allowed_codes: tuple[str, ...] = ("drowsiness_detected", "head_inattention_detected")
@@ -144,6 +170,8 @@ class AudioAlertConfig:
     audio_output_mode: str = "pdm_gpio"
     pwm_carrier_hz: int = DEFAULT_PWM_CARRIER_HZ
     pwm_step_hz: int = DEFAULT_PWM_STEP_HZ
+    pwm_noise_min_hz: int = DEFAULT_PWM_NOISE_MIN_HZ
+    pwm_noise_max_hz: int = DEFAULT_PWM_NOISE_MAX_HZ
 
     @classmethod
     def from_env(cls):
@@ -157,6 +185,7 @@ class AudioAlertConfig:
         return cls(
             enabled=env_bool("MP_AUDIO_ENABLED", False),
             tone_pin=env_int("MP_AUDIO_TONE_PIN", BOARD_TONE_PIN),
+            alt_tone_pin=env_int("MP_AUDIO_ALT_TONE_PIN", BOARD_ALT_PWM_PIN),
             shutdown_pin=env_int("MP_AUDIO_SHUTDOWN_PIN", BOARD_SHUTDOWN_PIN),
             default_frequency_hz=max(200, env_int("MP_AUDIO_DEFAULT_FREQUENCY_HZ", DEFAULT_AUDIO_FREQUENCY_HZ)),
             allowed_codes=allowed_codes or ("drowsiness_detected", "head_inattention_detected"),
@@ -168,6 +197,8 @@ class AudioAlertConfig:
             audio_output_mode=os.getenv("MP_AUDIO_OUTPUT_MODE", "pdm_gpio").strip().lower(),
             pwm_carrier_hz=max(1000, env_int("MP_AUDIO_PWM_CARRIER_HZ", DEFAULT_PWM_CARRIER_HZ)),
             pwm_step_hz=max(50, env_int("MP_AUDIO_PWM_STEP_HZ", DEFAULT_PWM_STEP_HZ)),
+            pwm_noise_min_hz=max(50, env_int("MP_AUDIO_PWM_NOISE_MIN_HZ", DEFAULT_PWM_NOISE_MIN_HZ)),
+            pwm_noise_max_hz=max(100, env_int("MP_AUDIO_PWM_NOISE_MAX_HZ", DEFAULT_PWM_NOISE_MAX_HZ)),
         )
 
 
@@ -221,6 +252,29 @@ class AudioAlertNotifier:
         )
         return True
 
+    def pwm_mapping_info(self):
+        board_pin = int(self.config.tone_pin)
+        try:
+            gpio_pin_data = _import_gpio_pin_data()
+            _, _, channel_data = gpio_pin_data.get_data()
+            ch_info = channel_data["BOARD"].get(board_pin)
+            if ch_info is None:
+                return {"board_pin": board_pin, "mapped": False, "reason": "no board pin entry"}
+            return {
+                "board_pin": board_pin,
+                "mapped": True,
+                "gpio_chip": getattr(ch_info, "gpio_chip", None),
+                "gpio_line": getattr(ch_info, "gpio_line", None),
+                "pwm_chip_dir": getattr(ch_info, "pwm_chip_dir", None),
+                "pwm_id": getattr(ch_info, "pwm_id", None),
+            }
+        except Exception as exc:
+            return {
+                "board_pin": board_pin,
+                "mapped": False,
+                "reason": str(exc),
+            }
+
     def stop(self):
         self._stop_event.set()
         try:
@@ -267,6 +321,47 @@ class AudioAlertNotifier:
         time.sleep(0.02)
         try:
             self._tone(frequency_hz, duration_s)
+        finally:
+            self._silence()
+        return True
+
+    def play_pwm_noise(self, duration_s=3.0, carrier_hz=None, deviation=45.0, step_hz=None, noise_min_hz=None, noise_max_hz=None):
+        if not self._enabled:
+            return False
+
+        if not self._use_pwm or self._pwm is None:
+            raise RuntimeError("PWM noise requested but no PWM channel is available")
+
+        duration_s = max(0.05, float(duration_s))
+        step_hz = int(step_hz or self.config.pwm_step_hz)
+        step_s = 1.0 / float(step_hz)
+        deviation = max(0.0, min(50.0, float(deviation)))
+        noise_min_hz = int(noise_min_hz or self.config.pwm_noise_min_hz)
+        noise_max_hz = int(noise_max_hz or self.config.pwm_noise_max_hz)
+        if noise_max_hz < noise_min_hz:
+            noise_min_hz, noise_max_hz = noise_max_hz, noise_min_hz
+        carrier_hz = max(1, int(carrier_hz or noise_min_hz))
+
+        self.router.emit_log(
+            "Audio PWM noise starting "
+            f"duration={duration_s:.2f}s carrier={carrier_hz}Hz step={step_hz}Hz "
+            f"noise_range={noise_min_hz}-{noise_max_hz}Hz deviation={deviation:.1f}% "
+            f"tone_pin={self.config.tone_pin}"
+        )
+        self._set_shutdown(True)
+        time.sleep(0.02)
+        try:
+            self._pwm.ChangeFrequency(carrier_hz)
+            self._pwm.start(50.0)
+            start = time.perf_counter()
+            current_hz = carrier_hz
+            while (time.perf_counter() - start) < duration_s and not self._stop_event.is_set():
+                if deviation > 0.0:
+                    duty = 50.0 + random.uniform(-deviation, deviation)
+                    self._pwm.ChangeDutyCycle(duty)
+                current_hz = random.randint(noise_min_hz, noise_max_hz)
+                self._pwm.ChangeFrequency(current_hz)
+                time.sleep(step_s)
         finally:
             self._silence()
         return True
@@ -387,23 +482,16 @@ class AudioAlertNotifier:
             pass
 
     def _tone_with_carrier_pwm(self, frequency_hz, duration_s):
-        carrier_hz = int(self.config.pwm_carrier_hz)
-        step_hz = int(self.config.pwm_step_hz)
-        step_s = 1.0 / float(step_hz)
-        carrier_period_s = 1.0 / float(carrier_hz)
         if self._pwm is None:
             raise RuntimeError("Carrier PWM requested but PWM channel is unavailable")
 
-        self._pwm.ChangeFrequency(carrier_hz)
+        # For a speaker/amp test, drive an actual audible square wave on the PWM
+        # pin. The previous carrier-modulated path was useful for signal probing,
+        # but it is not the right default for confirming that the speaker chain
+        # works end-to-end.
+        self._pwm.ChangeFrequency(int(frequency_hz))
         self._pwm.start(50.0)
-        start = time.perf_counter()
-        phase = 0.0
-        phase_step = 2.0 * math.pi * float(frequency_hz) / float(step_hz)
-        while (time.perf_counter() - start) < float(duration_s) and not self._stop_event.is_set():
-            duty = 50.0 + 45.0 * math.sin(phase)
-            self._pwm.ChangeDutyCycle(duty)
-            phase += phase_step
-            time.sleep(step_s)
+        self._sleep_interruptibly(float(duration_s))
         self._pwm.ChangeDutyCycle(0.0)
         self._pwm.stop()
 

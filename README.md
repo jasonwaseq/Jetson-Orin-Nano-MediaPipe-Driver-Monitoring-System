@@ -72,7 +72,7 @@ Use these free `J12` header pins because the IMU is already using `1/3/5/6`.
 | `VCC` | `Pin 2` (`5V`) | Better output headroom for the amp than 3.3V |
 | `GND` | `Pin 9` (`GND`) | Common ground |
 | `IN+` | `Pin 15` (`GPIO27 / PWM-capable`) | Audio input from the Jetson; use this as the signal input |
-| `IN-` | `Pin 14` (`GND`) | Ground reference for the amp input |
+| `IN-` | `Pin 14` (`GND`) or any Jetson GND pin | Ground reference for the amp input |
 | `SHDN` | `Pin 29` (`GPIO01`) | Software mute / enable control |
 | `OUT+` / `SPK+` | Speaker wire 1 | Connect directly to one speaker terminal |
 | `OUT-` / `SPK-` | Speaker wire 2 | Connect directly to the other speaker terminal |
@@ -95,11 +95,25 @@ If you need to validate the amp path by itself:
 PYTHONPATH=. ./venv/bin/python tests/audio_alert_debug.py
 ```
 
+To drive the amp with randomized PWM noise instead of a fixed tone:
+
+```bash
+PYTHONPATH=. ./venv/bin/python tests/audio_alert_debug.py --noise-seconds 5 --noise-deviation 40
+```
+
 To probe the pins while holding the amp enabled:
 
 ```bash
 PYTHONPATH=. ./venv/bin/python tests/audio_alert_debug.py --probe-pins --continuous-seconds 5 --frequency-hz 440
 ```
+
+For a direct speaker test on the PWM pin, use:
+
+```bash
+MP_AUDIO_OUTPUT_MODE=carrier_pwm PYTHONPATH=. ./venv/bin/python tests/audio_alert_debug.py --board-pin 15 --continuous-seconds 5 --frequency-hz 1000 --keep-shdn-enabled
+```
+
+This keeps the amp enabled and drives a steady audible tone on BOARD 15 while the test runs.
 
 ## Automatic Setup
 An easy way to run the model is through the `model_initializer.sh` script
