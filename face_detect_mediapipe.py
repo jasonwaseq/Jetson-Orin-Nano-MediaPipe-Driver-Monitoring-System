@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import time
 import numpy as np
+import threading
 
 # Local imports
 from modules.jetson_alert_dispatcher import JetsonAlertDispatcher
@@ -24,6 +25,7 @@ from modules.module_imu_speed_monitor import IMUSpeedMonitor, IMUSpeedMonitorCon
 from modules.module_latest_frame_reader import LatestFrameReader
 from modules.module_model_downloader import download_model
 from modules.module_web_socket import WebSocketBroadcaster
+from modules.module_alarm import Alarm
 
 # Model download setup
 MODEL_DIR = "../model/facenet_vpruned_quantized_v2.0.1"
@@ -84,6 +86,9 @@ HEAD_SMOOTHING_ALPHA = 0.3    # EMA smoothing for head position (0-1, lower = sm
 TOTAL_BLINKS = 0
 BLINK_COUNTER = 0
 START_TIME = time.time()
+
+# ── Set up local USB alarm ──
+ALERT = Alarm()
 
 # Drowsiness state
 EYES_CLOSED_START = None
@@ -338,6 +343,7 @@ try:
                                     ear=round(ear, 3),
                                     blink_ms=int(closed_duration * 1000),
                                 )
+                                ALERT.start_background()
                             DROWSY_ALERT_ACTIVE = True
                 else:
                     # Eyes open — check if we just finished a blink
