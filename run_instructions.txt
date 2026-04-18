@@ -9,22 +9,6 @@ Run this exact block:
   export MP_VIDEO_SOURCE='/dev/video0'
   export MP_CAMERA_BACKEND='v4l2'
   export MP_CAMERA_FOURCC='MJPG'
-  export MP_IMU_ENABLED='true'
-  export MP_IMU_I2C_BUS='7'
-  export MP_IMU_ADDRESS='0x28'
-  export MP_IMU_USE_LINEAR_ACCELERATION='true'
-  export MP_IMU_AXIS='magnitude'
-  export MP_IMU_SPEED_THRESHOLD_MPS2='2.5'
-  export MP_IMU_SUSTAIN_SECONDS='0.5'
-  export MP_IMU_ALERT_COOLDOWN_SECONDS='8.0'
-  export MP_IMU_SMOOTHING_ALPHA='0.2'
-  export MP_AUDIO_ENABLED='true'
-  export MP_AUDIO_TONE_PIN='15'
-  export MP_AUDIO_SHUTDOWN_PIN='29'
-  export MP_AUDIO_ALERT_CODES='drowsiness_detected,head_inattention_detected'
-  export MP_AUDIO_DEFAULT_FREQUENCY_HZ='880'
-  export MP_AUDIO_PREFER_PWM='true'
-
   # canonical values
   export MP_MQTT_HOST='73797b78ceac47e998c30ac034930c26.s1.eu.hivemq.cloud'
   export MP_MQTT_PORT='8883'
@@ -55,9 +39,6 @@ Run this exact block:
   export MPQTT_USERNAME="$MP_MQTT_USERNAME"
   export MPQTT_PASSWORD="$MP_MQTT_PASSWORD"
   export MPQTT_CLIENT_ID="$MP_MQTT_CLIENT_ID"
-
-  # optional bring-up check for the BNO055 only
-  ./venv/bin/python imu_bno055_debug.py
 
   pkill -f 'face_detect_mediapipe.py' || true
   ./venv/bin/python -u face_detect_mediapipe.py 2>&1 | tee /tmp/jetson_mqtt.log

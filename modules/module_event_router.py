@@ -89,6 +89,5 @@ class EventRouter:
             self.emit_log(f"BLE alert sent code={code}")
 
         if self.sound_notifier is not None:
-            ok = self.sound_notifier.send_alert(level, message, code=code)
-            if ok:
-                self.emit_log(f"Audio alert sent code={code}")
+            self.sound_notifier.send_alert(level, message)
+            self.emit_log(f"Sound alert sent code={code}")

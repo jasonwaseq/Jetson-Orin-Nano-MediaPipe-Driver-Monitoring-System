@@ -2,6 +2,7 @@ import cv2
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
+import ctypes
 import os
 import time
 import numpy as np
@@ -10,8 +11,6 @@ import sys
 from pathlib import Path
 
 # Local imports
-from modules.jetson_alert_dispatcher import JetsonAlertDispatcher
-from modules.module_audio_alert import AudioAlertConfig, AudioAlertNotifier
 from modules.module_event_router import EventRouter
 from modules.module_face_landmarker import (
     LEFT_EYE_EAR_INDICES,
@@ -22,10 +21,10 @@ from modules.module_face_landmarker import (
 )
 from modules.module_env_init import env_bool, env_bool_first, env_int
 from modules.module_gpu_preprocessor import CUDA_AVAILABLE, CUDA_INFO, GpuPreprocessor
-from modules.module_imu_speed_monitor import IMUSpeedMonitor, IMUSpeedMonitorConfig
 from modules.module_latest_frame_reader import LatestFrameReader, SynchronousFrameReader
 from modules.module_model_downloader import download_model
 from modules.module_web_socket import WebSocketBroadcaster
+from modules.module_ble_bridge import UdpBleNotifier
 
 # Model download setup
 MODEL_DIR = "model/facenet_vpruned_quantized_v2.0.1"
@@ -58,9 +57,6 @@ WS_PORT = env_int("MP_WS_PORT", 8765)
 # ── MQTT Uplink Parameters (primary integration path) ──
 MQTT_ENABLED = env_bool_first(["MP_MQTT_ENABLED", "MP_QTT_ENABLED", "MPMQTT_ENABLED", "MPQTT_ENABLED"], True)
 
-# ── BLE Direct-to-Driver Parameters ──
-BLE_ENABLED = env_bool("MP_BLE_ENABLED", True)
-
 # ── GPU / Benchmark Parameters ──
 # Set MP_BENCHMARK=1 to run both CPU and GPU preprocessing every 100 frames
 # and print a side-by-side comparison at the end.
@@ -81,6 +77,21 @@ HEAD_BASELINE_WINDOW = 90     # Frames to build initial baseline (~3s at 30fps)
 HEAD_DEVIATION_THRESHOLD = 0.06  # Normalized deviation from baseline to flag
 HEAD_INATTEN_TIME_THRESH = 2.0   # Seconds of sustained deviation = inattention event
 HEAD_SMOOTHING_ALPHA = 0.3    # EMA smoothing for head position (0-1, lower = smoother)
+
+
+def _enable_x11_threading():
+    """Prevent XCB aborts when OpenCV display runs alongside worker threads."""
+    try:
+        x11 = ctypes.CDLL("libX11.so.6")
+        x11.XInitThreads()
+        return True
+    except Exception as exc:
+        print(f"Warning: X11 threading init failed: {exc}")
+        return False
+
+
+if DISPLAY_ENABLED and not _enable_x11_threading():
+    DISPLAY_ENABLED = False
 
 # ── State Variables ──
 TOTAL_BLINKS = 0
@@ -111,28 +122,13 @@ if WS_ENABLED:
 
 dispatcher = None
 if MQTT_ENABLED:
+    from modules.jetson_alert_dispatcher import JetsonAlertDispatcher
     dispatcher = JetsonAlertDispatcher.from_env()
     if not dispatcher.connect():
         dispatcher = None
 
 # ── BLE notifier (direct-to-driver alerts) ──
-ble_notifier = None
-if BLE_ENABLED:
-    try:
-        from ble.ble_notifier import BLENotifier
-        ble_notifier = BLENotifier()
-        ble_notifier.start()
-    except Exception as exc:
-        print(f"BLE disabled: {exc}")
-        ble_notifier = None
-
-sound_notifier = None
-audio_config = AudioAlertConfig.from_env()
-if audio_config.enabled:
-    try:
-        sound_notifier = AudioAlertNotifier(router=None, config=audio_config)
-    except Exception:
-        sound_notifier = None
+ble_notifier = UdpBleNotifier()
 
 router = EventRouter(
     source_id=EVENT_SOURCE_ID,
@@ -140,28 +136,8 @@ router = EventRouter(
     schema_version=EVENT_SCHEMA_VERSION,
     dispatcher=dispatcher,
     ble_notifier=ble_notifier,
-    sound_notifier=sound_notifier,
     sinks=sinks,
 )
-
-if sound_notifier is not None:
-    sound_notifier.router = router
-    try:
-        sound_notifier.start()
-    except Exception as exc:
-        router.emit_log(f"Audio alerts disabled: {exc}", level="error")
-        sound_notifier = None
-        router.sound_notifier = None
-
-imu_monitor = None
-imu_config = IMUSpeedMonitorConfig.from_env()
-if imu_config.enabled:
-    try:
-        imu_monitor = IMUSpeedMonitor(router=router, config=imu_config)
-        imu_monitor.start()
-    except Exception as exc:
-        router.emit_log(f"IMU disabled: {exc}", level="error")
-        imu_monitor = None
 
 if not sinks and dispatcher is None and ble_notifier is None:
     router.emit_log("Warning: no event sink enabled. Alerts will not be forwarded.")
@@ -440,10 +416,6 @@ finally:
         raw_out.release()
     if DISPLAY_ENABLED:
         cv2.destroyAllWindows()
-    if imu_monitor is not None:
-        imu_monitor.stop()
-    if sound_notifier is not None:
-        sound_notifier.stop()
     if ws_broadcaster is not None:
         ws_broadcaster.stop()
     if dispatcher is not None:
@@ -456,9 +428,6 @@ router.emit_log(f"Processing complete! Total frames: {frame_count}")
 router.emit_log(f"Total Blinks: {TOTAL_BLINKS}")
 router.emit_log(f"Eye Closure Events: {DROWSY_EVENT_COUNT}")
 router.emit_log(f"Head Inattention Events: {HEAD_INATTENTION_COUNT}")
-if imu_monitor is not None:
-    router.emit_log(f"IMU Speeding Events: {imu_monitor.event_count}")
-
 # ── Preprocessing Performance Summary ──
 gpu_stats = gpu_preprocessor.stats()
 router.emit_log(f"\nPreprocessing backend: {gpu_stats['backend']}")

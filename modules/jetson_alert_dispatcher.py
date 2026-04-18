@@ -2,6 +2,7 @@ import json
 import os
 import threading
 import time
+import queue
 from datetime import datetime, timezone
 
 
@@ -102,6 +103,9 @@ class JetsonAlertDispatcher:
         self.heartbeat_seconds = max(5, int(heartbeat_seconds))
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread = None
+        self._publish_queue = queue.Queue()
+        self._publish_stop = threading.Event()
+        self._publish_thread = None
 
     @classmethod
     def from_env(cls):
@@ -210,6 +214,7 @@ class JetsonAlertDispatcher:
             return False
 
         self.publish_presence(online=True, metadata={"state": "connected"}, retain=True)
+        self._start_publish_worker()
         self._start_heartbeat()
         print(
             f"JetsonAlertDispatcher connected host={self.host}:{self.port} "
@@ -234,22 +239,8 @@ class JetsonAlertDispatcher:
         }
         encoded_payload = json.dumps(payload, separators=(",", ":"))
 
-        try:
-            result = self.client.publish(
-                self.topic,
-                payload=encoded_payload,
-                qos=self.qos,
-                retain=self.retain,
-            )
-            ok = result.rc == self._mqtt_mod.MQTT_ERR_SUCCESS
-            print(
-                f"publish_alert rc={result.rc} ok={ok} mid={result.mid} "
-                f"topic='{self.topic}' source_id='{self.source_id}' level={level}"
-            )
-            return ok
-        except Exception as exc:
-            print(f"publish_alert exception: {exc}")
-            return False
+        self._publish_queue.put(("alert", encoded_payload, self.topic, self.qos, self.retain))
+        return True
 
     def publish_presence(self, online, metadata=None, retain=True):
         if not self._enabled or self.client is None:
@@ -265,22 +256,8 @@ class JetsonAlertDispatcher:
         }
         encoded_payload = json.dumps(payload, separators=(",", ":"))
 
-        try:
-            result = self.client.publish(
-                self.status_topic,
-                payload=encoded_payload,
-                qos=self.qos,
-                retain=retain,
-            )
-            ok = result.rc == self._mqtt_mod.MQTT_ERR_SUCCESS
-            print(
-                f"publish_presence rc={result.rc} ok={ok} mid={result.mid} "
-                f"topic='{self.status_topic}' source_id='{self.source_id}' online={online}"
-            )
-            return ok
-        except Exception as exc:
-            print(f"publish_presence exception: {exc}")
-            return False
+        self._publish_queue.put(("presence", encoded_payload, self.status_topic, self.qos, retain))
+        return True
 
     def publish_heartbeat(self):
         if not self._enabled or self.client is None:
@@ -295,22 +272,8 @@ class JetsonAlertDispatcher:
         }
         encoded_payload = json.dumps(payload, separators=(",", ":"))
 
-        try:
-            result = self.client.publish(
-                self.status_topic,
-                payload=encoded_payload,
-                qos=self.qos,
-                retain=False,
-            )
-            ok = result.rc == self._mqtt_mod.MQTT_ERR_SUCCESS
-            print(
-                f"publish_heartbeat rc={result.rc} ok={ok} mid={result.mid} "
-                f"topic='{self.status_topic}' source_id='{self.source_id}'"
-            )
-            return ok
-        except Exception as exc:
-            print(f"publish_heartbeat exception: {exc}")
-            return False
+        self._publish_queue.put(("heartbeat", encoded_payload, self.status_topic, self.qos, False))
+        return True
 
     def _heartbeat_loop(self):
         while not self._heartbeat_stop.wait(self.heartbeat_seconds):
@@ -325,10 +288,40 @@ class JetsonAlertDispatcher:
         self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
         self._heartbeat_thread.start()
 
+    def _start_publish_worker(self):
+        if self._publish_thread is not None and self._publish_thread.is_alive():
+            return
+        self._publish_stop.clear()
+        self._publish_thread = threading.Thread(target=self._publish_loop, daemon=True)
+        self._publish_thread.start()
+
+    def _publish_loop(self):
+        while not self._publish_stop.is_set():
+            try:
+                kind, payload, topic, qos, retain = self._publish_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                result = self.client.publish(topic, payload=payload, qos=qos, retain=retain)
+                ok = result.rc == self._mqtt_mod.MQTT_ERR_SUCCESS
+                print(
+                    f"publish_{kind} rc={result.rc} ok={ok} mid={result.mid} "
+                    f"topic='{topic}' source_id='{self.source_id}'"
+                )
+            except Exception as exc:
+                print(f"publish_{kind} exception: {exc}")
+
     def _stop_heartbeat(self):
         self._heartbeat_stop.set()
         thread = self._heartbeat_thread
         self._heartbeat_thread = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+
+    def _stop_publish_worker(self):
+        self._publish_stop.set()
+        thread = self._publish_thread
+        self._publish_thread = None
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
 
@@ -340,6 +333,7 @@ class JetsonAlertDispatcher:
             if self._enabled:
                 self.publish_presence(online=False, metadata={"state": "closed"}, retain=True)
                 time.sleep(0.1)
+            self._stop_publish_worker()
             self.client.loop_stop()
             self.client.disconnect()
         except Exception:

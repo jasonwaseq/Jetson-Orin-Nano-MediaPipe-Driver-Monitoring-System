@@ -13,7 +13,9 @@ class Location:
     def get_location(self):
         return self.location
 
-curr = Location()
-curr_loc = curr.get_location()
-
-print(curr_loc)
+# Debug statements go in main()
+if __name__ == '__main__':
+    curr = Location()
+    curr_loc = curr.get_location()
+    
+    print(curr_loc)

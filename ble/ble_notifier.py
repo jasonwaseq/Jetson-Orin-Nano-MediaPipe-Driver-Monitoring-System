@@ -20,6 +20,16 @@ Payload format (UTF-8):
 
 import logging
 import threading
+import sys
+from pathlib import Path
+
+# Make system-packaged BlueZ bindings visible inside the project venv.
+for candidate in (
+    Path("/usr/lib/python3/dist-packages"),
+    Path("/usr/local/lib/python3/dist-packages"),
+):
+    if candidate.exists() and str(candidate) not in sys.path:
+        sys.path.append(str(candidate))
 
 import dbus
 import dbus.exceptions
@@ -243,6 +253,8 @@ class BLENotifier:
         self._loop: GLib.MainLoop | None = None
         self._char: Characteristic | None = None
         self._ready = threading.Event()
+        self._started_ok = False
+        self._start_error: str | None = None
 
     # ── lifecycle ─────────────────────────────────────────────────────
     def start(self):
@@ -250,7 +262,18 @@ class BLENotifier:
         self._thread = threading.Thread(target=self._run, daemon=True, name="ble")
         self._thread.start()
         self._ready.wait(timeout=10)
-        log.info("BLE notifier started — advertising as '%s'", cfg.BLE_DEVICE_NAME)
+        if self._started_ok:
+            print(
+                f"BLE notifier started advertising as '{cfg.BLE_DEVICE_NAME}' "
+                f"(service={cfg.BLE_SERVICE_UUID}, char={cfg.BLE_CHAR_UUID})"
+            )
+            log.info("BLE notifier started — advertising as '%s'", cfg.BLE_DEVICE_NAME)
+            return True
+        if self._start_error:
+            print(f"BLE notifier failed to start: {self._start_error}")
+        else:
+            print("BLE notifier failed to start: timed out waiting for BlueZ registration")
+        return False
 
     def stop(self):
         if self._loop:
@@ -277,21 +300,35 @@ class BLENotifier:
     # ── internal ──────────────────────────────────────────────────────
     def _run(self):
         """Runs in a background thread — sets up D-Bus + GLib mainloop."""
-        dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-        bus = dbus.SystemBus()
+        try:
+            dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+            bus = dbus.SystemBus()
+        except Exception as exc:
+            self._start_error = f"system bus unavailable: {exc}"
+            self._ready.set()
+            return
 
         adapter_path = self._find_adapter(bus)
         if not adapter_path:
+            self._start_error = "no BLE adapter found"
             log.error("No BLE adapter found — notifications disabled")
             self._ready.set()
             return
 
         # Make adapter discoverable
-        adapter_props = dbus.Interface(
-            bus.get_object(BLUEZ_SERVICE, adapter_path), DBUS_PROP_IFACE
-        )
-        adapter_props.Set(ADAPTER_IFACE, "Powered", dbus.Boolean(True))
-        adapter_props.Set(ADAPTER_IFACE, "Alias", dbus.String(cfg.BLE_DEVICE_NAME))
+        try:
+            adapter_props = dbus.Interface(
+                bus.get_object(BLUEZ_SERVICE, adapter_path), DBUS_PROP_IFACE
+            )
+            adapter_props.Set(ADAPTER_IFACE, "Powered", dbus.Boolean(True))
+            adapter_props.Set(ADAPTER_IFACE, "Pairable", dbus.Boolean(True))
+            adapter_props.Set(ADAPTER_IFACE, "Discoverable", dbus.Boolean(True))
+            adapter_props.Set(ADAPTER_IFACE, "Alias", dbus.String(cfg.BLE_DEVICE_NAME))
+            print(f"BLE adapter ready on {adapter_path} as '{cfg.BLE_DEVICE_NAME}'")
+        except Exception as exc:
+            self._start_error = f"failed to configure adapter {adapter_path}: {exc}"
+            self._ready.set()
+            return
 
         # Build GATT application
         app = Application(bus)
@@ -307,25 +344,31 @@ class BLENotifier:
         gatt_mgr = dbus.Interface(
             bus.get_object(BLUEZ_SERVICE, adapter_path), GATT_MGR_IFACE
         )
+        ad_mgr = dbus.Interface(
+            bus.get_object(BLUEZ_SERVICE, adapter_path), LE_AD_MGR_IFACE
+        )
+
+        def _fail(message):
+            self._start_error = message
+            self._ready.set()
+
         gatt_mgr.RegisterApplication(
             app.get_path(), {},
-            reply_handler=lambda: log.info("GATT application registered"),
-            error_handler=lambda e: log.error("GATT registration failed: %s", e),
+            reply_handler=lambda: print("BLE GATT application registered"),
+            error_handler=lambda e: _fail(f"GATT registration failed: {e}"),
         )
 
         # Register LE advertisement
         ad = Advertisement(bus, cfg.BLE_DEVICE_NAME, cfg.BLE_SERVICE_UUID)
-        ad_mgr = dbus.Interface(
-            bus.get_object(BLUEZ_SERVICE, adapter_path), LE_AD_MGR_IFACE
-        )
         ad_mgr.RegisterAdvertisement(
             ad.get_path(), {},
-            reply_handler=lambda: log.info("BLE advertisement registered"),
-            error_handler=lambda e: log.error("BLE advert failed: %s", e),
+            reply_handler=lambda: print(f"BLE advertisement registered as '{cfg.BLE_DEVICE_NAME}'"),
+            error_handler=lambda e: _fail(f"BLE advert failed: {e}"),
         )
 
         self._loop = GLib.MainLoop()
         self._ready.set()
+        self._started_ok = True
         self._loop.run()
 
     @staticmethod

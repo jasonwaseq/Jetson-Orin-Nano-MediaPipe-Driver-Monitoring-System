@@ -6,25 +6,6 @@ export MP_MQTT_PASSWORD='group7BananaSlug'
 export MP_MQTT_CLIENT_ID='uplink-jetson-01'
 export MP_QTT_HEARTBEAT_SECONDS='10'
 
-# IMU speeding-alert monitor
-export MP_IMU_ENABLED='true'
-export MP_IMU_I2C_BUS='7'
-export MP_IMU_ADDRESS='0x28'
-export MP_IMU_USE_LINEAR_ACCELERATION='true'
-export MP_IMU_AXIS='magnitude'
-export MP_IMU_SPEED_THRESHOLD_MPS2='2.5'
-export MP_IMU_SUSTAIN_SECONDS='0.5'
-export MP_IMU_ALERT_COOLDOWN_SECONDS='8.0'
-export MP_IMU_SMOOTHING_ALPHA='0.2'
-
-# Audio alert amp + speaker
-export MP_AUDIO_ENABLED='true'
-export MP_AUDIO_TONE_PIN='15'
-export MP_AUDIO_SHUTDOWN_PIN='29'
-export MP_AUDIO_ALERT_CODES='drowsiness_detected,head_inattention_detected'
-export MP_AUDIO_DEFAULT_FREQUENCY_HZ='880'
-export MP_AUDIO_PREFER_PWM='true'
-
 # mirror into alternate env name families
 export MP_QTT_HOST="$MP_MQTT_HOST"
 export MP_QTT_PORT="$MP_MQTT_PORT"
@@ -46,6 +27,14 @@ export MPQTT_TLS="$MP_MQTT_TLS"
 export MPQTT_USERNAME="$MP_MQTT_USERNAME"
 export MPQTT_PASSWORD="$MP_MQTT_PASSWORD"
 export MPQTT_CLIENT_ID="$MP_MQTT_CLIENT_ID"
+
+export PYTHONPATH="/usr/lib/python3/dist-packages:/usr/local/lib/python3/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
+
+pkill -f 'ble_bridge_server.py' || true
+./venv/bin/python -u ble/ble_bridge_server.py > /tmp/ble_bridge.log 2>&1 &
+
+pkill -f 'audio_bridge_server.py' || true
+./venv/bin/python -u audio/audio_bridge_server.py > /tmp/audio_bridge.log 2>&1 &
 
 pkill -f 'face_detect_mediapipe.py' || true
 ./venv/bin/python -u face_detect_mediapipe.py 2>&1 | tee /tmp/jetson_mqtt.log
