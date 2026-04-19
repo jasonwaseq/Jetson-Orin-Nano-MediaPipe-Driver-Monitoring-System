@@ -30,10 +30,13 @@ export MPQTT_CLIENT_ID="$MP_MQTT_CLIENT_ID"
 
 export PYTHONPATH="/usr/lib/python3/dist-packages:/usr/local/lib/python3/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
 
-pkill -f 'ble_bridge_server.py' || true
-./venv/bin/python -u ble/ble_bridge_server.py > /tmp/ble_bridge.log 2>&1 &
+bluetoothctl power on >/tmp/ble_btctl.log 2>&1 || true
+bluetoothctl discoverable on >/tmp/ble_btctl.log 2>&1 || true
 
-pkill -f 'audio_bridge_server.py' || true
+pkill -f 'ble\.ble_bridge_server' || true
+./venv/bin/python -u -m ble.ble_bridge_server > /tmp/ble_bridge.log 2>&1 &
+
+pkill -f 'audio\.audio_bridge_server' || true
 ./venv/bin/python -u audio/audio_bridge_server.py > /tmp/audio_bridge.log 2>&1 &
 
 pkill -f 'face_detect_mediapipe.py' || true
