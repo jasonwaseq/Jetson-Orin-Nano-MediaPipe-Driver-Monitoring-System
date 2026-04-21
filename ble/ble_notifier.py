@@ -204,12 +204,11 @@ class Characteristic(dbus.service.Object):
 class Advertisement(dbus.service.Object):
     PATH = "/org/sleepydrive/ad0"
 
-    def __init__(self, bus, device_name: str, service_uuid: str):
+    def __init__(self, bus, device_name: str):
         self.path = self.PATH
         self.bus = bus
         self.ad_type = "peripheral"
         self.local_name = device_name
-        self.service_uuids = [service_uuid]
         dbus.service.Object.__init__(self, bus, self.path)
 
     def get_path(self):
@@ -220,7 +219,6 @@ class Advertisement(dbus.service.Object):
             LE_AD_IFACE: {
                 "Type": self.ad_type,
                 "LocalName": dbus.String(self.local_name),
-                "ServiceUUIDs": dbus.Array(self.service_uuids, signature="s"),
             }
         }
 
@@ -260,9 +258,13 @@ class BLENotifier:
     # ── lifecycle ─────────────────────────────────────────────────────
     def start(self):
         """Start the BLE GATT server in a daemon thread."""
+        self._ready.clear()
+        self._started_ok = False
+        self._start_error = None
         self._thread = threading.Thread(target=self._run, daemon=True, name="ble")
         self._thread.start()
-        self._ready.wait(timeout=10)
+        if not self._ready.wait(timeout=10):
+            self._start_error = "timed out waiting for BlueZ registration"
         if self._started_ok:
             print(
                 f"BLE notifier started advertising as '{cfg.BLE_DEVICE_NAME}' "
@@ -304,118 +306,148 @@ class BLENotifier:
         try:
             dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
             bus = dbus.SystemBus()
-        except Exception as exc:
-            self._start_error = f"system bus unavailable: {exc}"
-            self._ready.set()
-            return
 
-        adapter_path = self._find_adapter(bus)
-        if not adapter_path:
-            self._start_error = "no BLE adapter found"
-            log.error("No BLE adapter found — notifications disabled")
-            self._ready.set()
-            return
+            adapter_path = self._find_adapter(bus)
+            if not adapter_path:
+                self._start_error = "no BLE adapter with GATT + LE advertising support found"
+                log.error("No BLE adapter with GATT + LE advertising support found")
+                self._ready.set()
+                return
 
-        # Make adapter discoverable
-        adapter_props = dbus.Interface(
-            bus.get_object(BLUEZ_SERVICE, adapter_path), DBUS_PROP_IFACE
-        )
-        try:
-            adapter_props.Set(ADAPTER_IFACE, "Powered", dbus.Boolean(True))
-        except Exception as exc:
-            self._start_error = f"failed to power adapter {adapter_path}: {exc}"
-            self._ready.set()
-            return
-
-        try:
-            adapter_props.Set(ADAPTER_IFACE, "Alias", dbus.String(cfg.BLE_DEVICE_NAME))
-        except Exception as exc:
-            self._start_error = f"failed to set adapter alias {adapter_path}: {exc}"
-            self._ready.set()
-            return
-
-        try:
-            adapter_props.Set(ADAPTER_IFACE, "DiscoverableTimeout", dbus.UInt32(0))
-        except Exception as exc:
-            print(f"BLE adapter warning: failed to set DiscoverableTimeout: {exc}")
-
-        try:
-            adapter_props.Set(ADAPTER_IFACE, "PairableTimeout", dbus.UInt32(0))
-        except Exception as exc:
-            print(f"BLE adapter warning: failed to set PairableTimeout: {exc}")
-
-        try:
-            subprocess.run(["bluetoothctl", "power", "on"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(["bluetoothctl", "discoverable", "on"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception as exc:
-            print(f"BLE adapter warning: bluetoothctl control failed: {exc}")
-
-        print(f"BLE adapter ready on {adapter_path} as '{cfg.BLE_DEVICE_NAME}'")
-        try:
-            current = adapter_props.GetAll(ADAPTER_IFACE)
-            print(
-                "BLE adapter state "
-                f"powered={bool(current.get('Powered', False))} "
-                f"discoverable={bool(current.get('Discoverable', False))} "
-                f"pairable={bool(current.get('Pairable', False))} "
-                f"alias={current.get('Alias', '')}"
+            # Make adapter discoverable
+            adapter_props = dbus.Interface(
+                bus.get_object(BLUEZ_SERVICE, adapter_path), DBUS_PROP_IFACE
             )
-        except Exception as exc:
-            print(f"BLE adapter warning: failed to read adapter state: {exc}")
+            try:
+                adapter_props.Set(ADAPTER_IFACE, "Powered", dbus.Boolean(True))
+            except Exception as exc:
+                self._start_error = f"failed to power adapter {adapter_path}: {exc}"
+                self._ready.set()
+                return
 
-        # Build GATT application
-        app = Application(bus)
-        svc = Service(bus, 0, cfg.BLE_SERVICE_UUID, True)
-        char = Characteristic(
-            bus, 0, cfg.BLE_CHAR_UUID, ["read", "notify"], svc
-        )
-        svc.add_characteristic(char)
-        app.add_service(svc)
-        self._char = char
+            try:
+                adapter_props.Set(ADAPTER_IFACE, "Alias", dbus.String(cfg.BLE_DEVICE_NAME))
+            except Exception as exc:
+                self._start_error = f"failed to set adapter alias {adapter_path}: {exc}"
+                self._ready.set()
+                return
 
-        gatt_mgr = dbus.Interface(
-            bus.get_object(BLUEZ_SERVICE, adapter_path), GATT_MGR_IFACE
-        )
-        ad_mgr = dbus.Interface(
-            bus.get_object(BLUEZ_SERVICE, adapter_path), LE_AD_MGR_IFACE
-        )
+            try:
+                adapter_props.Set(ADAPTER_IFACE, "DiscoverableTimeout", dbus.UInt32(0))
+            except Exception as exc:
+                print(f"BLE adapter warning: failed to set DiscoverableTimeout: {exc}")
 
-        ad = Advertisement(bus, cfg.BLE_DEVICE_NAME, cfg.BLE_SERVICE_UUID)
-        try:
-            gatt_mgr.RegisterApplication(
-                app.get_path(),
-                {},
-                reply_handler=lambda: print("BLE GATT application registered"),
-                error_handler=lambda e: self._fail_start(f"GATT registration failed: {e}"),
+            try:
+                adapter_props.Set(ADAPTER_IFACE, "Discoverable", dbus.Boolean(True))
+            except Exception as exc:
+                print(f"BLE adapter warning: failed to set Discoverable: {exc}")
+
+            try:
+                adapter_props.Set(ADAPTER_IFACE, "PairableTimeout", dbus.UInt32(0))
+            except Exception as exc:
+                print(f"BLE adapter warning: failed to set PairableTimeout: {exc}")
+
+            try:
+                adapter_props.Set(ADAPTER_IFACE, "Pairable", dbus.Boolean(True))
+            except Exception as exc:
+                print(f"BLE adapter warning: failed to set Pairable: {exc}")
+
+            try:
+                subprocess.run(
+                    ["bluetoothctl", "power", "on"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                subprocess.run(
+                    ["bluetoothctl", "discoverable", "on"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception as exc:
+                print(f"BLE adapter warning: bluetoothctl control failed: {exc}")
+
+            print(f"BLE adapter ready on {adapter_path} as '{cfg.BLE_DEVICE_NAME}'")
+            try:
+                current = adapter_props.GetAll(ADAPTER_IFACE)
+                print(
+                    "BLE adapter state "
+                    f"powered={bool(current.get('Powered', False))} "
+                    f"discoverable={bool(current.get('Discoverable', False))} "
+                    f"pairable={bool(current.get('Pairable', False))} "
+                    f"alias={current.get('Alias', '')}"
+                )
+            except Exception as exc:
+                print(f"BLE adapter warning: failed to read adapter state: {exc}")
+
+            # Build GATT application
+            app = Application(bus)
+            svc = Service(bus, 0, cfg.BLE_SERVICE_UUID, True)
+            char = Characteristic(
+                bus, 0, cfg.BLE_CHAR_UUID, ["read", "notify"], svc
             )
-        except Exception as exc:
-            self._fail_start(f"GATT registration failed: {exc}")
-            return
+            svc.add_characteristic(char)
+            app.add_service(svc)
+            self._char = char
 
-        try:
-            ad_mgr.RegisterAdvertisement(
-                ad.get_path(),
-                {},
-                reply_handler=lambda: print(f"BLE advertisement registered as '{cfg.BLE_DEVICE_NAME}'"),
-                error_handler=lambda e: self._fail_start(f"BLE advert failed: {e}"),
+            gatt_mgr = dbus.Interface(
+                bus.get_object(BLUEZ_SERVICE, adapter_path), GATT_MGR_IFACE
             )
+            ad_mgr = dbus.Interface(
+                bus.get_object(BLUEZ_SERVICE, adapter_path), LE_AD_MGR_IFACE
+            )
+
+            ad = Advertisement(bus, cfg.BLE_DEVICE_NAME)
+
+            registered = {"gatt": False, "advertisement": False}
+
+            def mark_registered(kind: str):
+                registered[kind] = True
+                if kind == "gatt":
+                    print("BLE GATT application registered")
+                else:
+                    print(f"BLE advertisement registered as '{cfg.BLE_DEVICE_NAME}'")
+
+                if all(registered.values()):
+                    self._started_ok = True
+                    self._ready.set()
+
+            self._loop = GLib.MainLoop()
+
+            try:
+                gatt_mgr.RegisterApplication(
+                    app.get_path(),
+                    {},
+                    reply_handler=lambda: mark_registered("gatt"),
+                    error_handler=lambda e: self._fail_start(f"GATT registration failed: {e}"),
+                )
+            except Exception as exc:
+                self._fail_start(f"GATT registration failed: {exc}")
+                return
+
+            try:
+                ad_mgr.RegisterAdvertisement(
+                    ad.get_path(),
+                    {},
+                    reply_handler=lambda: mark_registered("advertisement"),
+                    error_handler=lambda e: self._fail_start(f"BLE advert failed: {e}"),
+                )
+            except Exception as exc:
+                self._fail_start(f"BLE advert failed: {exc}")
+                return
+
+            self._loop.run()
         except Exception as exc:
-            self._fail_start(f"BLE advert failed: {exc}")
-            return
-
-        try:
-            print("BLE managed objects registered")
-        except Exception:
-            pass
-
-        self._loop = GLib.MainLoop()
-        self._started_ok = True
-        self._ready.set()
-        self._loop.run()
+            self._start_error = str(exc)
+            log.error("BLE startup failed: %s", exc)
+            self._ready.set()
 
     def _fail_start(self, message):
         self._start_error = message
         self._ready.set()
+        if self._loop:
+            self._loop.quit()
 
     @staticmethod
     def _find_adapter(bus) -> str | None:
@@ -423,6 +455,6 @@ class BLENotifier:
         om = dbus.Interface(bus.get_object(BLUEZ_SERVICE, "/"), DBUS_OM_IFACE)
         objects = om.GetManagedObjects()
         for path, ifaces in objects.items():
-            if GATT_MGR_IFACE in ifaces:
+            if GATT_MGR_IFACE in ifaces and LE_AD_MGR_IFACE in ifaces:
                 return path
         return None

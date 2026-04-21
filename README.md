@@ -25,12 +25,20 @@ No frame stream is sent by this script.
 
 - Python 3.10+
 - Webcam (or update `VIDEO_SOURCE` in the script)
+- BlueZ with BLE advertising support enabled on the Jetson
 - Python packages:
   - `mediapipe`
   - `opencv-python`
   - `numpy`
   - `paho-mqtt`
   - `websockets` (optional, only if enabling local WS output)
+  - `dbus-python` and `PyGObject` if `MP_BLE_ENABLED=1`
+
+## BLE Bring-Up Notes
+
+- BLE direct alerts are enabled by default with `MP_BLE_ENABLED=1`.
+- The BLE server code registers a BlueZ GATT app and advertisement over the system D-Bus, so it often needs elevated privileges on the Jetson. If startup prints `BLE notifier failed to start: ...`, try launching the detector with `sudo` or disable BLE temporarily with `export MP_BLE_ENABLED=0`.
+- A successful startup should print both `BLE GATT application registered` and `BLE advertisement registered as 'SleepyDrive'`. If you do not see those lines, the phone app will never discover `SleepyDrive`.
 
 ## Automatic Setup
 An easy way to run the model is through the `model_initializer.sh` script
