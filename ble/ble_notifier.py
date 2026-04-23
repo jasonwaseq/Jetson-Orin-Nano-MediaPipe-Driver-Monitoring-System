@@ -204,11 +204,12 @@ class Characteristic(dbus.service.Object):
 class Advertisement(dbus.service.Object):
     PATH = "/org/sleepydrive/ad0"
 
-    def __init__(self, bus, device_name: str):
+    def __init__(self, bus, device_name: str, service_uuid: str):
         self.path = self.PATH
         self.bus = bus
         self.ad_type = "peripheral"
         self.local_name = device_name
+        self.service_uuid = service_uuid
         dbus.service.Object.__init__(self, bus, self.path)
 
     def get_path(self):
@@ -219,6 +220,8 @@ class Advertisement(dbus.service.Object):
             LE_AD_IFACE: {
                 "Type": self.ad_type,
                 "LocalName": dbus.String(self.local_name),
+                # Advertise service UUID so phones scanning by UUID find us instantly.
+                "ServiceUUIDs": dbus.Array([self.service_uuid], signature="s"),
             }
         }
 
@@ -398,7 +401,7 @@ class BLENotifier:
                 bus.get_object(BLUEZ_SERVICE, adapter_path), LE_AD_MGR_IFACE
             )
 
-            ad = Advertisement(bus, cfg.BLE_DEVICE_NAME)
+            ad = Advertisement(bus, cfg.BLE_DEVICE_NAME, cfg.BLE_SERVICE_UUID)
 
             registered = {"gatt": False, "advertisement": False}
 
