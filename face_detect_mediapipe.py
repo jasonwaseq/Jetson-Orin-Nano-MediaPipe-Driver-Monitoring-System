@@ -22,6 +22,7 @@ from modules.module_face_landmarker import (
 from modules.module_env_init import env_bool, env_bool_first, env_int
 from modules.module_gpu_preprocessor import CUDA_AVAILABLE, CUDA_INFO, GpuPreprocessor
 from modules.module_latest_frame_reader import LatestFrameReader
+from modules.module_drowsiness import DrowsinessState, update_drowsiness_state
 from modules.module_model_downloader import download_model
 from modules.module_web_socket import WebSocketBroadcaster
 from modules.module_ble_bridge import UdpBleNotifier
@@ -100,9 +101,7 @@ BLINK_COUNTER = 0
 START_TIME = time.time()
 
 # Drowsiness state
-EYES_CLOSED_START = None
-DROWSY_ALERT_ACTIVE = False
-DROWSY_EVENT_COUNT = 0
+DROWSINESS_STATE = DrowsinessState()
 
 # Head attention state
 head_baseline_samples = []        # samples during calibration
@@ -299,40 +298,19 @@ try:
                 left_ear = calculate_ear(face_landmarks, LEFT_EYE_EAR_INDICES, frame.shape)
                 right_ear = calculate_ear(face_landmarks, RIGHT_EYE_EAR_INDICES, frame.shape)
                 ear = (left_ear + right_ear) / 2.0
-
-                if ear < EAR_THRESHOLD:
-                    BLINK_COUNTER += 1
-
-                    # Drowsiness: track how long eyes have been closed
-                    if EYES_CLOSED_START is None:
-                        EYES_CLOSED_START = current_time
-                    else:
-                        closed_duration = current_time - EYES_CLOSED_START
-                        if closed_duration >= DROWSY_TIME_THRESHOLD:
-                            if not DROWSY_ALERT_ACTIVE:
-                                DROWSY_EVENT_COUNT += 1
-                                message = (f"DROWSINESS DETECTED! Event #{DROWSY_EVENT_COUNT}"
-                                           f" (eyes closed {closed_duration:.1f}s)")
-                                router.emit_log(message, level="warning")
-                                router.emit_alert(
-                                    "drowsiness_detected",
-                                    message,
-                                    severity="critical",
-                                    event_count=DROWSY_EVENT_COUNT,
-                                    closed_duration_sec=round(closed_duration, 3),
-                                    ear=round(ear, 3),
-                                    blink_ms=int(closed_duration * 1000),
-                                )
-                                if alarm is not None:
-                                    alarm.start_background()
-                            DROWSY_ALERT_ACTIVE = True
-                else:
-                    # Eyes open — check if we just finished a blink
-                    if BLINK_COUNTER >= EAR_CONSEC_FRAMES:
-                        TOTAL_BLINKS += 1
-                    BLINK_COUNTER = 0
-                    EYES_CLOSED_START = None
-                    DROWSY_ALERT_ACTIVE = False
+                DROWSINESS_STATE.blink_counter = BLINK_COUNTER
+                update_drowsiness_state(
+                    ear=ear,
+                    current_time=current_time,
+                    state=DROWSINESS_STATE,
+                    ear_threshold=EAR_THRESHOLD,
+                    drowsy_time_threshold=DROWSY_TIME_THRESHOLD,
+                    blink_frame_threshold=EAR_CONSEC_FRAMES,
+                    router=router,
+                    alarm=alarm,
+                )
+                BLINK_COUNTER = DROWSINESS_STATE.blink_counter
+                TOTAL_BLINKS = DROWSINESS_STATE.total_blinks
 
                 # ── 2. Head Vertical Attention ──
                 head_y = get_head_vertical_position(face_landmarks)
@@ -403,7 +381,7 @@ try:
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, TEXT_COLOR, 2)
                 y_pos += 30
 
-                cv2.putText(annotated_frame, f"Eye Closure Events: {DROWSY_EVENT_COUNT}", (10, y_pos),
+                cv2.putText(annotated_frame, f"Eye Closure Events: {DROWSINESS_STATE.event_count}", (10, y_pos),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, TEXT_COLOR_1, 2)
                 y_pos += 30
 
@@ -459,7 +437,7 @@ finally:
 router.emit_log(f"\n{'='*50}")
 router.emit_log(f"Processing complete! Total frames: {frame_count}")
 router.emit_log(f"Total Blinks: {TOTAL_BLINKS}")
-router.emit_log(f"Eye Closure Events: {DROWSY_EVENT_COUNT}")
+router.emit_log(f"Eye Closure Events: {DROWSINESS_STATE.event_count}")
 router.emit_log(f"Head Inattention Events: {HEAD_INATTENTION_COUNT}")
 # ── Preprocessing Performance Summary ──
 gpu_stats = gpu_preprocessor.stats()
