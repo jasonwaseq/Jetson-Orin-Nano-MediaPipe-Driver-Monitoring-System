@@ -4,6 +4,7 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import ctypes
 import os
+import subprocess
 from pathlib import Path
 import time
 import numpy as np
@@ -24,7 +25,7 @@ from modules.module_latest_frame_reader import LatestFrameReader
 from modules.module_model_downloader import download_model
 from modules.module_web_socket import WebSocketBroadcaster
 from modules.module_ble_bridge import UdpBleNotifier
-from modules.module_sound_bridge import UdpSoundNotifier
+from modules.module_alarm import Alarm, SoundDeviceNotFoundError
 
 # Model download setup
 MODEL_DIR = "../model/facenet_vpruned_quantized_v2.0.1"
@@ -129,7 +130,12 @@ if MQTT_ENABLED:
 
 # ── BLE notifier (direct-to-driver alerts) ──
 ble_notifier = UdpBleNotifier()
-sound_notifier = UdpSoundNotifier()
+alarm = Alarm()
+alarm.search_for_alarm()
+
+if not alarm._speaker_found:
+    print("Warning: can't detect a sound device, alarm output is disabled.")
+    #raise SoundDeviceNotFoundError()
 
 router = EventRouter(
     source_id=EVENT_SOURCE_ID,
@@ -137,7 +143,6 @@ router = EventRouter(
     schema_version=EVENT_SCHEMA_VERSION,
     dispatcher=dispatcher,
     ble_notifier=ble_notifier,
-    sound_notifier=sound_notifier,
     sinks=sinks,
 )
 
@@ -318,6 +323,8 @@ try:
                                     ear=round(ear, 3),
                                     blink_ms=int(closed_duration * 1000),
                                 )
+                                if alarm is not None:
+                                    alarm.start_background()
                             DROWSY_ALERT_ACTIVE = True
                 else:
                     # Eyes open — check if we just finished a blink
@@ -372,6 +379,8 @@ try:
                                         deviation=round(deviation, 4),
                                         deviated_duration_sec=round(deviated_duration, 3),
                                     )
+                                    if alarm is not None:
+                                        alarm.start_background()
                                 HEAD_INATTENTION_ACTIVE = True
                     else:
                         head_deviated_start = None
@@ -444,8 +453,8 @@ finally:
         dispatcher.close()
     if ble_notifier is not None:
         ble_notifier.stop()
-    if sound_notifier is not None:
-        sound_notifier.stop()
+    if alarm is not None:
+        alarm.stop()
 
 router.emit_log(f"\n{'='*50}")
 router.emit_log(f"Processing complete! Total frames: {frame_count}")
