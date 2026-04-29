@@ -172,15 +172,11 @@ class Characteristic(dbus.service.Object):
 
     @dbus.service.method(GATT_CHAR_IFACE)
     def StartNotify(self):
-        if self._notifying:
-            return
         self._notifying = True
         log.info("Client subscribed to notifications")
 
     @dbus.service.method(GATT_CHAR_IFACE)
     def StopNotify(self):
-        if not self._notifying:
-            return
         self._notifying = False
         log.info("Client unsubscribed from notifications")
 
