@@ -85,8 +85,8 @@ class EventRouter:
             self.emit_log(f"MQTT publish ok={ok} code={code} message={message}")
 
         if self.ble_notifier is not None:
-            self.ble_notifier.send_alert(level, message)
-            self.emit_log(f"BLE alert sent code={code}")
+            ok = self.ble_notifier.send_alert(level, message)
+            self.emit_log(f"BLE alert sent ok={ok} code={code}")
 
         if self.sound_notifier is not None:
             self.sound_notifier.send_alert(level, message)

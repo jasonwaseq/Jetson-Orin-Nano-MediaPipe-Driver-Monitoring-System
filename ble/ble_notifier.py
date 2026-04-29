@@ -22,6 +22,7 @@ import logging
 import threading
 import sys
 import subprocess
+from collections import deque
 from pathlib import Path
 
 # Make system-packaged BlueZ bindings visible inside the project venv.
@@ -41,6 +42,10 @@ from gi.repository import GLib
 from ble import config as cfg
 
 log = logging.getLogger("ble")
+
+MAX_BLE_PAYLOAD_BYTES = 180
+MAX_PENDING_ALERTS = 20
+STATUS_CONNECTED_PAYLOAD = b"-1|connected"
 
 # ── D-Bus constants ──────────────────────────────────────────────────
 BLUEZ_SERVICE       = "org.bluez"
@@ -142,6 +147,8 @@ class Characteristic(dbus.service.Object):
         self.descriptors: list = []
         self._value: list = []
         self._notifying = False
+        self._pending_alerts = deque(maxlen=MAX_PENDING_ALERTS)
+        self._last_alert: bytes | None = None
         dbus.service.Object.__init__(self, bus, self.path)
 
     def get_path(self):
@@ -152,6 +159,8 @@ class Characteristic(dbus.service.Object):
             GATT_CHAR_IFACE: {
                 "Service": self.service.get_path(),
                 "UUID": self.uuid,
+                "Value": self._value,
+                "Notifying": dbus.Boolean(self._notifying),
                 "Flags": self.flags,
                 "Descriptors": dbus.Array(
                     [d.get_path() for d in self.descriptors],
@@ -172,16 +181,18 @@ class Characteristic(dbus.service.Object):
 
     @dbus.service.method(GATT_CHAR_IFACE)
     def StartNotify(self):
+        if self._notifying:
+            return
         self._notifying = True
         log.info("Client subscribed to notifications")
-        # Send a visible confirmation so the app can verify end-to-end delivery.
-        GLib.idle_add(
-            self.send_notification,
-            b"0|BLE connected to SleepyDrive",
-        )
+        self._emit_value(STATUS_CONNECTED_PAYLOAD)
+        while self._pending_alerts:
+            self._emit_value(self._pending_alerts.popleft())
 
     @dbus.service.method(GATT_CHAR_IFACE)
     def StopNotify(self):
+        if not self._notifying:
+            return
         self._notifying = False
         log.info("Client unsubscribed from notifications")
 
@@ -189,14 +200,40 @@ class Characteristic(dbus.service.Object):
     def PropertiesChanged(self, interface, changed, invalidated):
         pass
 
-    def send_notification(self, value_bytes: bytes):
-        """Push a GATT notification to subscribed clients."""
+    def _set_value(self, value_bytes: bytes):
         self._value = dbus.Array([dbus.Byte(b) for b in value_bytes], signature="y")
-        if self._notifying:
+
+    def _emit_value(self, value_bytes: bytes) -> bool:
+        self._set_value(value_bytes)
+        try:
             self.PropertiesChanged(
-                GATT_CHAR_IFACE, {"Value": self._value}, []
+                GATT_CHAR_IFACE,
+                dbus.Dictionary({"Value": self._value}, signature="sv"),
+                [],
             )
             log.debug("Notification sent: %s", value_bytes)
+        except Exception as exc:
+            self._notifying = False
+            log.warning(
+                "Notification failed; client will need to resubscribe: %s",
+                exc,
+            )
+        return False
+
+    def send_notification(self, value_bytes: bytes, remember: bool = True):
+        """Push a GATT notification to subscribed clients."""
+        if remember:
+            self._last_alert = value_bytes
+        if self._notifying:
+            return self._emit_value(value_bytes)
+        self._set_value(self._last_alert or value_bytes)
+        if remember:
+            self._pending_alerts.append(value_bytes)
+            log.info(
+                "Client not subscribed; queued BLE alert (%d pending)",
+                len(self._pending_alerts),
+            )
+        return False
 
 
 # =====================================================================
@@ -300,9 +337,10 @@ class BLENotifier:
         if not self._char:
             log.warning("BLE not ready, alert dropped")
             return
-        payload = f"{level}|{message}"
-        data = payload.encode("utf-8")[:500]
-        GLib.idle_add(self._char.send_notification, data)
+        clean_message = str(message).replace("\n", " ").replace("\r", " ")
+        payload = f"{int(level)}|{clean_message}\n"
+        data = payload.encode("utf-8", errors="ignore")[:MAX_BLE_PAYLOAD_BYTES]
+        GLib.idle_add(self._char.send_notification, data, level >= 0)
 
     # ── internal ──────────────────────────────────────────────────────
     def _run(self):
