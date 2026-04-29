@@ -174,6 +174,11 @@ class Characteristic(dbus.service.Object):
     def StartNotify(self):
         self._notifying = True
         log.info("Client subscribed to notifications")
+        # Send a visible confirmation so the app can verify end-to-end delivery.
+        GLib.idle_add(
+            self.send_notification,
+            b"0|BLE connected to SleepyDrive",
+        )
 
     @dbus.service.method(GATT_CHAR_IFACE)
     def StopNotify(self):
