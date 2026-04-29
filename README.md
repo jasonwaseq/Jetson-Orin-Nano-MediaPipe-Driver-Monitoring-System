@@ -114,6 +114,23 @@ sleepydrive/alerts/+
 - Bluetooth alerts are sent locally to subscribed phones and do not require internet access.
 - If the Bluetooth adapter or BlueZ stack is unavailable, the script logs the failure and continues with the remaining sinks.
 
+### Loud local alarm
+
+- Every alert also triggers the local audio alarm path.
+- The alarm player forces ALSA output volume to 100% when `amixer` is available, then plays `modules/sound/alarm_sound.wav`.
+- If the UDP audio bridge is unavailable, the notifier falls back to local playback instead of dropping the alert.
+
+### Reboot persistence
+
+- Use the provided systemd unit in `systemd/mediapipe-alert-stack.service` to launch the alert stack at boot.
+- Install it once, then enable it:
+
+```bash
+sudo cp systemd/mediapipe-alert-stack.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now mediapipe-alert-stack.service
+```
+
 ### Local WebSocket output (optional debug only)
 
 - `MP_WS_ENABLED` (default: `0`)

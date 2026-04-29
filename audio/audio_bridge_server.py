@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from modules.module_alarm import Alarm
+
 
 def _resolve_alarm_sound_path():
     sound_dir = Path(__file__).resolve().parent.parent / "modules" / "sound"
@@ -21,6 +23,7 @@ def main():
         print(f"Audio bridge disabled: missing 'aplay' for {sound_path}")
         return 1
 
+    alarm = Alarm()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("127.0.0.1", 8767))
     print(f"Audio bridge ready on 127.0.0.1:8767 using {aplay_path}")
@@ -28,7 +31,8 @@ def main():
         while True:
             data, _addr = sock.recvfrom(1024)
             _text = data.decode("utf-8", errors="ignore")
-            subprocess.run([aplay_path, "-q", str(sound_path)], check=False)
+            # Every alert retriggers the alarm locally.
+            alarm.play_once()
     except KeyboardInterrupt:
         pass
     finally:

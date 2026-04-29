@@ -1,0 +1,17 @@
+[Unit]
+Description=MediaPipe driver alert stack
+Wants=network-online.target bluetooth.target
+After=network-online.target bluetooth.target
+
+[Service]
+Type=simple
+User=group7
+Group=group7
+WorkingDirectory=/home/group7/Developer/mediapipe
+ExecStart=/bin/bash /home/group7/Developer/mediapipe/model_initializer.sh
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

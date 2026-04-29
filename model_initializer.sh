@@ -35,6 +35,11 @@ bluetoothctl discoverable on >/tmp/ble_btctl.log 2>&1 || true
 
 pkill -f 'ble\.ble_bridge_server' || true
 ./venv/bin/python -u -m ble.ble_bridge_server > /tmp/ble_bridge.log 2>&1 &
+for _ in $(seq 1 120); do
+  grep -q "BLE bridge ready" /tmp/ble_bridge.log && break
+  sleep 0.1
+done
+export MP_BLE_BRIDGE_AUTOSTART='false'
 
 pkill -f 'audio\.audio_bridge_server' || true
 ./venv/bin/python -u audio/audio_bridge_server.py > /tmp/audio_bridge.log 2>&1 &

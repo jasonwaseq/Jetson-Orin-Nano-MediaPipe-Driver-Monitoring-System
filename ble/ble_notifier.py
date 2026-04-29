@@ -185,9 +185,13 @@ class Characteristic(dbus.service.Object):
             return
         self._notifying = True
         log.info("Client subscribed to notifications")
-        self._emit_value(STATUS_CONNECTED_PAYLOAD)
-        while self._pending_alerts:
-            self._emit_value(self._pending_alerts.popleft())
+        if not self._notify_value(STATUS_CONNECTED_PAYLOAD):
+            return
+        while self._pending_alerts and self._notifying:
+            alert = self._pending_alerts.popleft()
+            if not self._notify_value(alert):
+                self._pending_alerts.appendleft(alert)
+                break
 
     @dbus.service.method(GATT_CHAR_IFACE)
     def StopNotify(self):
@@ -203,7 +207,7 @@ class Characteristic(dbus.service.Object):
     def _set_value(self, value_bytes: bytes):
         self._value = dbus.Array([dbus.Byte(b) for b in value_bytes], signature="y")
 
-    def _emit_value(self, value_bytes: bytes) -> bool:
+    def _notify_value(self, value_bytes: bytes) -> bool:
         self._set_value(value_bytes)
         try:
             self.PropertiesChanged(
@@ -218,14 +222,19 @@ class Characteristic(dbus.service.Object):
                 "Notification failed; client will need to resubscribe: %s",
                 exc,
             )
-        return False
+            return False
+        return True
 
     def send_notification(self, value_bytes: bytes, remember: bool = True):
         """Push a GATT notification to subscribed clients."""
         if remember:
             self._last_alert = value_bytes
         if self._notifying:
-            return self._emit_value(value_bytes)
+            if self._notify_value(value_bytes):
+                return False
+            if remember:
+                self._pending_alerts.appendleft(value_bytes)
+            return False
         self._set_value(self._last_alert or value_bytes)
         if remember:
             self._pending_alerts.append(value_bytes)

@@ -56,6 +56,7 @@ WS_PORT = env_int("MP_WS_PORT", 8765)
 
 # ── MQTT Uplink Parameters (primary integration path) ──
 MQTT_ENABLED = env_bool_first(["MP_MQTT_ENABLED", "MP_QTT_ENABLED", "MPMQTT_ENABLED", "MPQTT_ENABLED"], True)
+BLE_ENABLED = env_bool("MP_BLE_ENABLED", True)
 
 # ── GPU / Benchmark Parameters ──
 # Set MP_BENCHMARK=1 to run both CPU and GPU preprocessing every 100 frames
@@ -128,7 +129,7 @@ if MQTT_ENABLED:
         dispatcher = None
 
 # ── BLE notifier (direct-to-driver alerts) ──
-ble_notifier = UdpBleNotifier()
+ble_notifier = UdpBleNotifier() if BLE_ENABLED else None
 
 router = EventRouter(
     source_id=EVENT_SOURCE_ID,
