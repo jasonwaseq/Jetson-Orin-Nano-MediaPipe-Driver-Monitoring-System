@@ -1,5 +1,6 @@
 import socket
 import sys
+import threading
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -15,11 +16,34 @@ for candidate in (
 
 from ble.ble_notifier import BLENotifier
 
+_HEARTBEAT_INTERVAL = 10  # seconds
+
+
+def _heartbeat_loop(notifier: BLENotifier, stop: threading.Event) -> None:
+    """Send a keep-alive ping every _HEARTBEAT_INTERVAL seconds.
+
+    Without periodic traffic the BlueZ link-layer supervision timeout can
+    drop the BLE connection even though both sides are still alive.
+    Level -1 is filtered out on the Flutter side and never shown in the UI.
+    """
+    while not stop.wait(timeout=_HEARTBEAT_INTERVAL):
+        notifier.send_alert(-1, "ping")
+
 
 def main():
     notifier = BLENotifier()
     if not notifier.start():
         return 1
+
+    stop_event = threading.Event()
+    hb_thread = threading.Thread(
+        target=_heartbeat_loop,
+        args=(notifier, stop_event),
+        daemon=True,
+        name="ble-heartbeat",
+    )
+    hb_thread.start()
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("127.0.0.1", 8766))
     print("BLE bridge ready on 127.0.0.1:8766")
@@ -38,6 +62,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        stop_event.set()
         notifier.stop()
         sock.close()
     return 0
