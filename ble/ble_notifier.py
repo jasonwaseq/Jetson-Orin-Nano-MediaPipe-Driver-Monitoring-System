@@ -22,7 +22,6 @@ import logging
 import threading
 import sys
 import subprocess
-from collections import deque
 from pathlib import Path
 
 # Make system-packaged BlueZ bindings visible inside the project venv.
@@ -42,10 +41,6 @@ from gi.repository import GLib
 from ble import config as cfg
 
 log = logging.getLogger("ble")
-
-MAX_BLE_PAYLOAD_BYTES = 180
-MAX_PENDING_ALERTS = 20
-STATUS_CONNECTED_PAYLOAD = b"-1|connected"
 
 # ── D-Bus constants ──────────────────────────────────────────────────
 BLUEZ_SERVICE       = "org.bluez"
@@ -145,10 +140,9 @@ class Characteristic(dbus.service.Object):
         self.flags = flags
         self.service = service
         self.descriptors: list = []
-        self._value: list = []
+        # Keep Value typed as byte array even when empty so D-Bus can encode it.
+        self._value = dbus.Array([], signature="y")
         self._notifying = False
-        self._pending_alerts = deque(maxlen=MAX_PENDING_ALERTS)
-        self._last_alert: bytes | None = None
         dbus.service.Object.__init__(self, bus, self.path)
 
     def get_path(self):
@@ -159,8 +153,6 @@ class Characteristic(dbus.service.Object):
             GATT_CHAR_IFACE: {
                 "Service": self.service.get_path(),
                 "UUID": self.uuid,
-                "Value": self._value,
-                "Notifying": dbus.Boolean(self._notifying),
                 "Flags": self.flags,
                 "Descriptors": dbus.Array(
                     [d.get_path() for d in self.descriptors],
@@ -185,13 +177,6 @@ class Characteristic(dbus.service.Object):
             return
         self._notifying = True
         log.info("Client subscribed to notifications")
-        if not self._notify_value(STATUS_CONNECTED_PAYLOAD):
-            return
-        while self._pending_alerts and self._notifying:
-            alert = self._pending_alerts.popleft()
-            if not self._notify_value(alert):
-                self._pending_alerts.appendleft(alert)
-                break
 
     @dbus.service.method(GATT_CHAR_IFACE)
     def StopNotify(self):
@@ -204,45 +189,14 @@ class Characteristic(dbus.service.Object):
     def PropertiesChanged(self, interface, changed, invalidated):
         pass
 
-    def _set_value(self, value_bytes: bytes):
+    def send_notification(self, value_bytes: bytes):
+        """Push a GATT notification to subscribed clients."""
         self._value = dbus.Array([dbus.Byte(b) for b in value_bytes], signature="y")
-
-    def _notify_value(self, value_bytes: bytes) -> bool:
-        self._set_value(value_bytes)
-        try:
+        if self._notifying:
             self.PropertiesChanged(
-                GATT_CHAR_IFACE,
-                dbus.Dictionary({"Value": self._value}, signature="sv"),
-                [],
+                GATT_CHAR_IFACE, {"Value": self._value}, []
             )
             log.debug("Notification sent: %s", value_bytes)
-        except Exception as exc:
-            self._notifying = False
-            log.warning(
-                "Notification failed; client will need to resubscribe: %s",
-                exc,
-            )
-            return False
-        return True
-
-    def send_notification(self, value_bytes: bytes, remember: bool = True):
-        """Push a GATT notification to subscribed clients."""
-        if remember:
-            self._last_alert = value_bytes
-        if self._notifying:
-            if self._notify_value(value_bytes):
-                return False
-            if remember:
-                self._pending_alerts.appendleft(value_bytes)
-            return False
-        self._set_value(self._last_alert or value_bytes)
-        if remember:
-            self._pending_alerts.append(value_bytes)
-            log.info(
-                "Client not subscribed; queued BLE alert (%d pending)",
-                len(self._pending_alerts),
-            )
-        return False
 
 
 # =====================================================================
@@ -346,10 +300,9 @@ class BLENotifier:
         if not self._char:
             log.warning("BLE not ready, alert dropped")
             return
-        clean_message = str(message).replace("\n", " ").replace("\r", " ")
-        payload = f"{int(level)}|{clean_message}\n"
-        data = payload.encode("utf-8", errors="ignore")[:MAX_BLE_PAYLOAD_BYTES]
-        GLib.idle_add(self._char.send_notification, data, level >= 0)
+        payload = f"{level}|{message}"
+        data = payload.encode("utf-8")[:500]
+        GLib.idle_add(self._char.send_notification, data)
 
     # ── internal ──────────────────────────────────────────────────────
     def _run(self):

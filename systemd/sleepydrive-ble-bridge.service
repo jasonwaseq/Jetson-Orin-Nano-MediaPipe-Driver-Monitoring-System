@@ -1,0 +1,21 @@
+[Unit]
+Description=SleepyDrive BLE bridge server
+After=bluetooth.service network.target
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+User=group7
+Group=group7
+WorkingDirectory=/home/group7/Developer/mediapipe
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/usr/lib/python3/dist-packages:/usr/local/lib/python3/dist-packages
+ExecStartPre=/usr/bin/pkill -f 'ble\.ble_bridge_server' || true
+ExecStart=/home/group7/Developer/mediapipe/venv/bin/python -u -m ble.ble_bridge_server
+Restart=always
+RestartSec=3
+StandardOutput=append:/tmp/ble_bridge.log
+StandardError=append:/tmp/ble_bridge.log
+
+[Install]
+WantedBy=multi-user.target

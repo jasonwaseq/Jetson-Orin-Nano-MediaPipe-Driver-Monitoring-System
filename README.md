@@ -39,6 +39,26 @@ No frame stream is sent by this script.
 - BLE direct alerts are enabled by default with `MP_BLE_ENABLED=1`.
 - The BLE server code registers a BlueZ GATT app and advertisement over the system D-Bus, so it often needs elevated privileges on the Jetson. If startup prints `BLE notifier failed to start: ...`, try launching the detector with `sudo` or disable BLE temporarily with `export MP_BLE_ENABLED=0`.
 - A successful startup should print both `BLE GATT application registered` and `BLE advertisement registered as 'SleepyDrive'`. If you do not see those lines, the phone app will never discover `SleepyDrive`.
+- Run `./scripts/ble_health.sh` to quickly inspect bridge process state, adapter status, and BLE startup markers.
+
+### Keep BLE bridge merge-ready (recommended)
+
+Use the provided `systemd` unit to keep one supervised BLE bridge process alive and avoid stale duplicate advertisers:
+
+```bash
+cd /home/group7/Developer/mediapipe
+chmod +x scripts/ble_health.sh
+sudo cp systemd/sleepydrive-ble-bridge.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now sleepydrive-ble-bridge.service
+sudo systemctl status sleepydrive-ble-bridge.service --no-pager
+```
+
+When using this service, disable bridge autostart in detector shells:
+
+```bash
+export MP_BLE_BRIDGE_AUTOSTART='false'
+```
 
 ## Automatic Setup
 An easy way to run the model is through the `model_initializer.sh` script
@@ -113,23 +133,6 @@ sleepydrive/alerts/+
 - BLE alert delivery is enabled by default in the Jetson entrypoints.
 - Bluetooth alerts are sent locally to subscribed phones and do not require internet access.
 - If the Bluetooth adapter or BlueZ stack is unavailable, the script logs the failure and continues with the remaining sinks.
-
-### Loud local alarm
-
-- Every alert also triggers the local audio alarm path.
-- The alarm player forces ALSA output volume to 100% when `amixer` is available, then plays `modules/sound/alarm_sound.wav`.
-- If the UDP audio bridge is unavailable, the notifier falls back to local playback instead of dropping the alert.
-
-### Reboot persistence
-
-- Use the provided systemd unit in `systemd/mediapipe-alert-stack.service` to launch the alert stack at boot.
-- Install it once, then enable it:
-
-```bash
-sudo cp systemd/mediapipe-alert-stack.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now mediapipe-alert-stack.service
-```
 
 ### Local WebSocket output (optional debug only)
 
