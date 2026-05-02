@@ -72,6 +72,7 @@ EAR_CONSEC_FRAMES = 2         # Consecutive closed frames to register a blink
 
 # ── Drowsiness (Prolonged Eye Closure) Parameters ──
 DROWSY_TIME_THRESHOLD = 1.5   # Seconds of continuous eye closure = drowsy event
+OUT_OF_FRAME_TIME_THRESHOLD = 2.0  # Seconds without a face before alerting
 
 # ── Head Pose (Attention) Parameters ──
 # We build a baseline of the driver's normal head position over the first few seconds.
@@ -111,6 +112,9 @@ head_smoothed_y = None            # EMA-smoothed current head y
 head_deviated_start = None        # when head first deviated
 HEAD_INATTENTION_ACTIVE = False
 HEAD_INATTENTION_COUNT = 0
+out_of_frame_start = None         # when face first disappeared
+OUT_OF_FRAME_ACTIVE = False
+OUT_OF_FRAME_COUNT = 0
 
 ws_broadcaster = None
 sinks = []
@@ -293,6 +297,8 @@ try:
             current_time = time.time()
 
             if detection_result.face_landmarks:
+                out_of_frame_start = None
+                OUT_OF_FRAME_ACTIVE = False
                 face_landmarks = detection_result.face_landmarks[0]
 
                 # ── 1. EAR + Blink + Drowsiness ──
@@ -390,15 +396,42 @@ try:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, TEXT_COLOR_1, 2)
                 y_pos += 30
 
+                cv2.putText(annotated_frame, f"Out of Frame Events: {OUT_OF_FRAME_COUNT}", (10, y_pos),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, TEXT_COLOR_1, 2)
+                y_pos += 30
+
                 # Calibration indicator
                 if head_baseline_y is None:
                     progress = len(head_baseline_samples) / HEAD_BASELINE_WINDOW * 100
                     cv2.putText(annotated_frame, f"Calibrating head... {progress:.0f}%", (10, y_pos),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
+            # If user isn't in frame
             else:
+                if out_of_frame_start is None:
+                    out_of_frame_start = current_time
+
+                missing_duration = current_time - out_of_frame_start
                 cv2.putText(annotated_frame, "No Face Detected - Highly Likely Driver Is Asleep", (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                if missing_duration >= OUT_OF_FRAME_TIME_THRESHOLD:
+                    if not OUT_OF_FRAME_ACTIVE:
+                        OUT_OF_FRAME_COUNT += 1
+                        message = (
+                            f"USER OUT OF FRAME! Event #{OUT_OF_FRAME_COUNT}"
+                            f" (no face {missing_duration:.1f}s)"
+                        )
+                        router.emit_log(message, level="warning")
+                        router.emit_alert(
+                            "user_out_of_frame_detected",
+                            message,
+                            severity="high",
+                            event_count=OUT_OF_FRAME_COUNT,
+                            missing_duration_sec=round(missing_duration, 3),
+                        )
+                        if alarm is not None:
+                            alarm.start_background()
+                    OUT_OF_FRAME_ACTIVE = True
 
             if out is not None:
                 out.write(annotated_frame)
@@ -440,6 +473,7 @@ router.emit_log(f"Processing complete! Total frames: {frame_count}")
 router.emit_log(f"Total Blinks: {TOTAL_BLINKS}")
 router.emit_log(f"Eye Closure Events: {DROWSINESS_STATE.event_count}")
 router.emit_log(f"Head Inattention Events: {HEAD_INATTENTION_COUNT}")
+router.emit_log(f"Out of Frame Events: {OUT_OF_FRAME_COUNT}")
 # ── Preprocessing Performance Summary ──
 gpu_stats = gpu_preprocessor.stats()
 router.emit_log(f"\nPreprocessing backend: {gpu_stats['backend']}")
