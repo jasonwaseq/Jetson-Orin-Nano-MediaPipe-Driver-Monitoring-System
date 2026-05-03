@@ -1,5 +1,5 @@
-import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -16,18 +16,85 @@ def test_alarm_starts_audio_playback(monkeypatch):
     monkeypatch.setattr(Path, "is_file", lambda self: True)
 
     calls = []
+    processes = []
 
-    def fake_run(cmd, check=False):
-        calls.append((cmd, check))
+    class FakeProcess:
+        def __init__(self):
+            self.returncode = None
+            self.terminated = False
+            self.killed = False
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    def fake_popen(cmd):
+        process = FakeProcess()
+        calls.append(cmd)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(module_alarm.subprocess, "Popen", fake_popen)
 
     alarm = module_alarm.Alarm()
     alarm.start_background()
-    if alarm._thread is not None:
-        alarm._thread.join(timeout=1)
 
-    assert calls == [(['/usr/bin/aplay', '-q', str(alarm.alarm_sound_path)], False)]
+    deadline = time.time() + 1
+    while not calls and time.time() < deadline:
+        time.sleep(0.01)
+
+    alarm.stop()
+
+    assert calls == [['/usr/bin/aplay', '-q', str(alarm.alarm_sound_path)]]
+    assert processes[0].terminated
+    assert alarm._thread is not None
+    assert not alarm._thread.is_alive()
+
+
+def test_alarm_restarts_audio_until_stopped(monkeypatch):
+    monkeypatch.setattr(module_alarm, "_speaker_device_present", lambda: True)
+    monkeypatch.setattr(module_alarm.shutil, "which", lambda name: "/usr/bin/aplay")
+    monkeypatch.setattr(Path, "is_file", lambda self: True)
+
+    calls = []
+
+    class FinishedProcess:
+        def poll(self):
+            return 0
+
+        def terminate(self):
+            raise AssertionError("finished process should not be terminated")
+
+        def wait(self, timeout=None):
+            return 0
+
+    alarm = module_alarm.Alarm()
+
+    def fake_popen(cmd):
+        calls.append(cmd)
+        if len(calls) == 3:
+            alarm.stop_playing_sound()
+        return FinishedProcess()
+
+    monkeypatch.setattr(module_alarm.subprocess, "Popen", fake_popen)
+
+    alarm.play_sound_forever()
+
+    assert calls == [
+        ['/usr/bin/aplay', '-q', str(alarm.alarm_sound_path)],
+        ['/usr/bin/aplay', '-q', str(alarm.alarm_sound_path)],
+        ['/usr/bin/aplay', '-q', str(alarm.alarm_sound_path)],
+    ]
 
 
 if __name__ == "__main__":

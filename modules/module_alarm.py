@@ -57,6 +57,8 @@ class Alarm:
         self.alarm_sound_path = _resolve_alarm_sound_path()
         self._player = shutil.which("aplay")
         self._thread = None
+        self._process = None
+        self._process_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._speaker_found = _speaker_device_present()
         if self._player is None:
@@ -66,30 +68,64 @@ class Alarm:
         self._speaker_found = _speaker_device_present()
 
     def play_sound(self):
+        self.play_sound_forever()
+
+    def _stop_current_process(self):
+        with self._process_lock:
+            process = self._process
+
+        if process is None or process.poll() is not None:
+            return
+
+        process.terminate()
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=1)
+
+    def play_sound_forever(self):
         if self._player is None:
             return
 
         while not self._stop_event.is_set():
-            subprocess.run(
+            process = subprocess.Popen(
                 [self._player, "-q", str(self.alarm_sound_path)],
-                check=False,
             )
-            break
+            with self._process_lock:
+                self._process = process
+
+            while process.poll() is None:
+                if self._stop_event.wait(timeout=0.1):
+                    self._stop_current_process()
+                    break
+
+    def stop_playing_sound(self):
+        self._stop_event.set()
+        self._stop_current_process()
+        if (
+            self._thread is not None
+            and self._thread.is_alive()
+            and self._thread is not threading.current_thread()
+        ):
+            self._thread.join(timeout=1)
 
     def start_background(self):
         if self._thread is not None and self._thread.is_alive():
             return self._thread
         self._stop_event.clear()
-        self._thread = threading.Thread(target=self.play_sound, daemon=True)
+        self._thread = threading.Thread(target=self.play_sound_forever, daemon=True)
         self._thread.start()
         return self._thread
 
     def stop(self):
-        self._stop_event.set()
+        self.stop_playing_sound()
 
 if __name__ == '__main__':
     alert = Alarm()
-    alert.start_background()
+    alert.play_sound_forever()
+    time.sleep(10)
+    alert.stop_playing_sound()
     if not alert._speaker_found:
         print("Warning: Speaker Not Found")
     time.sleep(1)

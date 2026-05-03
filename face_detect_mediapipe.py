@@ -94,6 +94,11 @@ def _enable_x11_threading():
         return False
 
 
+def _stop_alarm_when_recovered(alarm, *active_alerts):
+    if alarm is not None and not any(active_alerts):
+        alarm.stop()
+
+
 if DISPLAY_ENABLED and not _enable_x11_threading():
     DISPLAY_ENABLED = False
 
@@ -432,6 +437,13 @@ try:
                         if alarm is not None:
                             alarm.start_background()
                     OUT_OF_FRAME_ACTIVE = True
+
+            _stop_alarm_when_recovered(
+                alarm,
+                DROWSINESS_STATE.alert_active,
+                HEAD_INATTENTION_ACTIVE,
+                OUT_OF_FRAME_ACTIVE,
+            )
 
             if out is not None:
                 out.write(annotated_frame)
