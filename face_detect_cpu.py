@@ -22,9 +22,14 @@ from modules.module_face_landmarker import (
 from modules.module_env_init import env_bool, env_bool_first, env_int
 from modules.module_gpu_preprocessor import CUDA_AVAILABLE, CUDA_INFO, GpuPreprocessor
 from modules.module_latest_frame_reader import LatestFrameReader, SynchronousFrameReader
+from modules.module_alert_continuity import (
+    AlertContinuityTracker,
+    update_driver_alert_continuity,
+)
 from modules.module_model_downloader import download_model
 from modules.module_web_socket import WebSocketBroadcaster
 from modules.module_ble_bridge import UdpBleNotifier
+from modules.module_alarm import Alarm
 
 # Model download setup
 MODEL_DIR = "model/facenet_vpruned_quantized_v2.0.1"
@@ -70,6 +75,8 @@ EAR_CONSEC_FRAMES = 2         # Consecutive closed frames to register a blink
 
 # ── Drowsiness (Prolonged Eye Closure) Parameters ──
 DROWSY_TIME_THRESHOLD = 1.5   # Seconds of continuous eye closure = drowsy event
+OUT_OF_FRAME_TIME_THRESHOLD = 2.0  # Seconds without a face before alerting
+ALERT_UPDATE_INTERVAL_SEC = env_int("MP_ALERT_UPDATE_INTERVAL_SEC", 1)
 
 # ── Head Pose (Attention) Parameters ──
 # We build a baseline of the driver's normal head position over the first few seconds.
@@ -111,6 +118,9 @@ head_smoothed_y = None            # EMA-smoothed current head y
 head_deviated_start = None        # when head first deviated
 HEAD_INATTENTION_ACTIVE = False
 HEAD_INATTENTION_COUNT = 0
+out_of_frame_start = None         # when face first disappeared
+OUT_OF_FRAME_ACTIVE = False
+OUT_OF_FRAME_COUNT = 0
 
 ws_broadcaster = None
 sinks = []
@@ -130,6 +140,10 @@ if MQTT_ENABLED:
 
 # ── BLE notifier (direct-to-driver alerts) ──
 ble_notifier = UdpBleNotifier() if BLE_ENABLED else None
+alarm = Alarm()
+alarm.search_for_alarm()
+if not alarm._speaker_found:
+    print("Warning: can't detect a sound device, alarm output is disabled.")
 
 router = EventRouter(
     source_id=EVENT_SOURCE_ID,
@@ -142,6 +156,8 @@ router = EventRouter(
 
 if not sinks and dispatcher is None and ble_notifier is None:
     router.emit_log("Warning: no event sink enabled. Alerts will not be forwarded.")
+
+alert_tracker = AlertContinuityTracker(router, ALERT_UPDATE_INTERVAL_SEC)
 
 
 cap = cv2.VideoCapture(VIDEO_SOURCE)
@@ -265,6 +281,8 @@ try:
             current_time = time.time()
 
             if detection_result.face_landmarks:
+                out_of_frame_start = None
+                OUT_OF_FRAME_ACTIVE = False
                 face_landmarks = detection_result.face_landmarks[0]
 
                 # ── 1. EAR + Blink + Drowsiness ──
@@ -379,6 +397,10 @@ try:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, TEXT_COLOR_1, 2)
                 y_pos += 30
 
+                cv2.putText(annotated_frame, f"Out of Frame Events: {OUT_OF_FRAME_COUNT}", (10, y_pos),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, TEXT_COLOR_1, 2)
+                y_pos += 30
+
                 # Calibration indicator
                 if head_baseline_y is None:
                     progress = len(head_baseline_samples) / HEAD_BASELINE_WINDOW * 100
@@ -386,8 +408,47 @@ try:
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
             else:
+                if out_of_frame_start is None:
+                    out_of_frame_start = current_time
+
+                missing_duration = current_time - out_of_frame_start
                 cv2.putText(annotated_frame, "No Face Detected - Highly Likely Driver Is Asleep", (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                if missing_duration >= OUT_OF_FRAME_TIME_THRESHOLD:
+                    if not OUT_OF_FRAME_ACTIVE:
+                        OUT_OF_FRAME_COUNT += 1
+                        message = (
+                            f"USER OUT OF FRAME! Event #{OUT_OF_FRAME_COUNT}"
+                            f" (no face {missing_duration:.1f}s)"
+                        )
+                        router.emit_log(message, level="warning")
+                        router.emit_alert(
+                            "user_out_of_frame_detected",
+                            message,
+                            severity="high",
+                            event_count=OUT_OF_FRAME_COUNT,
+                            missing_duration_sec=round(missing_duration, 3),
+                        )
+                    OUT_OF_FRAME_ACTIVE = True
+
+            alarm.set_active(
+                DROWSY_ALERT_ACTIVE
+                or HEAD_INATTENTION_ACTIVE
+                or OUT_OF_FRAME_ACTIVE
+            )
+            update_driver_alert_continuity(
+                tracker=alert_tracker,
+                current_time=current_time,
+                drowsiness_active=DROWSY_ALERT_ACTIVE,
+                drowsiness_since=EYES_CLOSED_START,
+                drowsiness_event_count=DROWSY_EVENT_COUNT,
+                head_inattention_active=HEAD_INATTENTION_ACTIVE,
+                head_inattention_since=head_deviated_start,
+                head_inattention_count=HEAD_INATTENTION_COUNT,
+                out_of_frame_active=OUT_OF_FRAME_ACTIVE,
+                out_of_frame_since=out_of_frame_start,
+                out_of_frame_count=OUT_OF_FRAME_COUNT,
+            )
 
             if out is not None:
                 out.write(annotated_frame)
@@ -423,12 +484,15 @@ finally:
         dispatcher.close()
     if ble_notifier is not None:
         ble_notifier.stop()
+    if alarm is not None:
+        alarm.stop()
 
 router.emit_log(f"\n{'='*50}")
 router.emit_log(f"Processing complete! Total frames: {frame_count}")
 router.emit_log(f"Total Blinks: {TOTAL_BLINKS}")
 router.emit_log(f"Eye Closure Events: {DROWSY_EVENT_COUNT}")
 router.emit_log(f"Head Inattention Events: {HEAD_INATTENTION_COUNT}")
+router.emit_log(f"Out of Frame Events: {OUT_OF_FRAME_COUNT}")
 # ── Preprocessing Performance Summary ──
 gpu_stats = gpu_preprocessor.stats()
 router.emit_log(f"\nPreprocessing backend: {gpu_stats['backend']}")

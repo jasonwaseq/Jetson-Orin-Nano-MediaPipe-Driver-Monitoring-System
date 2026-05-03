@@ -70,6 +70,14 @@ class Alarm:
     def play_sound(self):
         self.play_sound_forever()
 
+    def play_once(self):
+        if self._player is None:
+            return
+
+        subprocess.Popen(
+            [self._player, "-q", str(self.alarm_sound_path)],
+        ).wait()
+
     def _stop_current_process(self):
         with self._process_lock:
             process = self._process
@@ -117,6 +125,12 @@ class Alarm:
         self._thread = threading.Thread(target=self.play_sound_forever, daemon=True)
         self._thread.start()
         return self._thread
+
+    def set_active(self, active):
+        if active:
+            self.start_background()
+        else:
+            self.stop()
 
     def stop(self):
         self.stop_playing_sound()

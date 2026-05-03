@@ -22,6 +22,10 @@ from modules.module_face_landmarker import (
 from modules.module_env_init import env_bool, env_bool_first, env_int
 from modules.module_gpu_preprocessor import CUDA_AVAILABLE, CUDA_INFO, GpuPreprocessor
 from modules.module_latest_frame_reader import LatestFrameReader
+from modules.module_alert_continuity import (
+    AlertContinuityTracker,
+    update_driver_alert_continuity,
+)
 from modules.module_drowsiness import DrowsinessState, update_drowsiness_state
 from modules.module_model_downloader import download_model
 from modules.module_web_socket import WebSocketBroadcaster
@@ -73,6 +77,7 @@ EAR_CONSEC_FRAMES = 2         # Consecutive closed frames to register a blink
 # ── Drowsiness (Prolonged Eye Closure) Parameters ──
 DROWSY_TIME_THRESHOLD = 1.5   # Seconds of continuous eye closure = drowsy event
 OUT_OF_FRAME_TIME_THRESHOLD = 2.0  # Seconds without a face before alerting
+ALERT_UPDATE_INTERVAL_SEC = env_int("MP_ALERT_UPDATE_INTERVAL_SEC", 1)
 
 # ── Head Pose (Attention) Parameters ──
 # We build a baseline of the driver's normal head position over the first few seconds.
@@ -94,9 +99,9 @@ def _enable_x11_threading():
         return False
 
 
-def _stop_alarm_when_recovered(alarm, *active_alerts):
-    if alarm is not None and not any(active_alerts):
-        alarm.stop()
+def _sync_alarm_with_alerts(alarm, *active_alerts):
+    if alarm is not None:
+        alarm.set_active(any(active_alerts))
 
 
 if DISPLAY_ENABLED and not _enable_x11_threading():
@@ -157,6 +162,8 @@ router = EventRouter(
 
 if not sinks and dispatcher is None and ble_notifier is None:
     router.emit_log("Warning: no event sink enabled. Alerts will not be forwarded.")
+
+alert_tracker = AlertContinuityTracker(router, ALERT_UPDATE_INTERVAL_SEC)
 
 
 def _video_sources_to_try(source):
@@ -438,11 +445,24 @@ try:
                             alarm.start_background()
                     OUT_OF_FRAME_ACTIVE = True
 
-            _stop_alarm_when_recovered(
+            _sync_alarm_with_alerts(
                 alarm,
                 DROWSINESS_STATE.alert_active,
                 HEAD_INATTENTION_ACTIVE,
                 OUT_OF_FRAME_ACTIVE,
+            )
+            update_driver_alert_continuity(
+                tracker=alert_tracker,
+                current_time=current_time,
+                drowsiness_active=DROWSINESS_STATE.alert_active,
+                drowsiness_since=DROWSINESS_STATE.eyes_closed_start,
+                drowsiness_event_count=DROWSINESS_STATE.event_count,
+                head_inattention_active=HEAD_INATTENTION_ACTIVE,
+                head_inattention_since=head_deviated_start,
+                head_inattention_count=HEAD_INATTENTION_COUNT,
+                out_of_frame_active=OUT_OF_FRAME_ACTIVE,
+                out_of_frame_since=out_of_frame_start,
+                out_of_frame_count=OUT_OF_FRAME_COUNT,
             )
 
             if out is not None:
