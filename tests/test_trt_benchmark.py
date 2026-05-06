@@ -1,9 +1,21 @@
 """
-Benchmark test: Compare MediaPipe (CPU) vs TensorRT (GPU) Face Landmarker.
-Run on the Jetson with:
+Manual benchmark: Compare MediaPipe (CPU) vs TensorRT (GPU) Face Landmarker.
+
+This file is intentionally skipped during automated pytest collection because it
+requires Jetson GPU runtime, ONNX model artifacts, and video/camera input. Run it
+directly on the Jetson when benchmarking TensorRT performance:
+
   cd ~/Developer/mediapipe && source venv/bin/activate
-  python3 test_trt_benchmark.py
+  python3 tests/test_trt_benchmark.py
 """
+import pytest
+
+if __name__ != "__main__":
+    pytest.skip(
+        "manual TensorRT benchmark requires Jetson runtime and model artifacts",
+        allow_module_level=True,
+    )
+
 import cv2
 import numpy as np
 import time
