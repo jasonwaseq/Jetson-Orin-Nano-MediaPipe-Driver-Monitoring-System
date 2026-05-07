@@ -19,9 +19,9 @@ Payload format (UTF-8):
 """
 
 import logging
+import os
 import threading
 import sys
-import subprocess
 from pathlib import Path
 
 # Make system-packaged BlueZ bindings visible inside the project venv.
@@ -41,6 +41,13 @@ from gi.repository import GLib
 from ble import config as cfg
 
 log = logging.getLogger("ble")
+
+
+def _env_bool(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
 
 # ── D-Bus constants ──────────────────────────────────────────────────
 BLUEZ_SERVICE       = "org.bluez"
@@ -336,41 +343,26 @@ class BLENotifier:
                 self._ready.set()
                 return
 
-            try:
-                adapter_props.Set(ADAPTER_IFACE, "DiscoverableTimeout", dbus.UInt32(0))
-            except Exception as exc:
-                print(f"BLE adapter warning: failed to set DiscoverableTimeout: {exc}")
+            if _env_bool("MP_BLE_SET_DISCOVERABLE", True):
+                try:
+                    adapter_props.Set(ADAPTER_IFACE, "DiscoverableTimeout", dbus.UInt32(0))
+                except Exception as exc:
+                    print(f"BLE adapter warning: failed to set DiscoverableTimeout: {exc}")
 
-            try:
-                adapter_props.Set(ADAPTER_IFACE, "Discoverable", dbus.Boolean(True))
-            except Exception as exc:
-                print(f"BLE adapter warning: failed to set Discoverable: {exc}")
+                try:
+                    adapter_props.Set(ADAPTER_IFACE, "Discoverable", dbus.Boolean(True))
+                except Exception as exc:
+                    print(f"BLE adapter warning: failed to set Discoverable: {exc}")
 
-            try:
-                adapter_props.Set(ADAPTER_IFACE, "PairableTimeout", dbus.UInt32(0))
-            except Exception as exc:
-                print(f"BLE adapter warning: failed to set PairableTimeout: {exc}")
+                try:
+                    adapter_props.Set(ADAPTER_IFACE, "PairableTimeout", dbus.UInt32(0))
+                except Exception as exc:
+                    print(f"BLE adapter warning: failed to set PairableTimeout: {exc}")
 
-            try:
-                adapter_props.Set(ADAPTER_IFACE, "Pairable", dbus.Boolean(True))
-            except Exception as exc:
-                print(f"BLE adapter warning: failed to set Pairable: {exc}")
-
-            try:
-                subprocess.run(
-                    ["bluetoothctl", "power", "on"],
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                subprocess.run(
-                    ["bluetoothctl", "discoverable", "on"],
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except Exception as exc:
-                print(f"BLE adapter warning: bluetoothctl control failed: {exc}")
+                try:
+                    adapter_props.Set(ADAPTER_IFACE, "Pairable", dbus.Boolean(True))
+                except Exception as exc:
+                    print(f"BLE adapter warning: failed to set Pairable: {exc}")
 
             print(f"BLE adapter ready on {adapter_path} as '{cfg.BLE_DEVICE_NAME}'")
             try:

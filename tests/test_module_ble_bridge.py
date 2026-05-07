@@ -23,6 +23,18 @@ def test_send_alert_returns_false_without_bridge(monkeypatch):
         notifier.stop()
 
 
+def test_send_alert_fast_fails_during_backoff(monkeypatch):
+    monkeypatch.setenv("MP_BLE_BRIDGE_ACK_TIMEOUT", "0.05")
+    monkeypatch.setenv("MP_BLE_BRIDGE_SEND_ATTEMPTS", "1")
+    monkeypatch.setenv("MP_BLE_BRIDGE_FAILURE_BACKOFF_SEC", "30")
+    notifier = UdpBleNotifier(port=_unused_udp_port(), auto_start=False)
+    try:
+        assert notifier.send_alert(2, "drowsy") is False
+        assert notifier.send_alert(2, "drowsy again") is False
+    finally:
+        notifier.stop()
+
+
 def test_send_alert_returns_true_after_bridge_ack(monkeypatch):
     monkeypatch.setenv("MP_BLE_BRIDGE_ACK_TIMEOUT", "0.2")
     monkeypatch.setenv("MP_BLE_BRIDGE_SEND_ATTEMPTS", "1")

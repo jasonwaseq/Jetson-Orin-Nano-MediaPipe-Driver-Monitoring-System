@@ -78,6 +78,7 @@ class JetsonAlertDispatcher:
         keepalive=60,
         source="jetson",
         heartbeat_seconds=10,
+        publish_queue_size=None,
     ):
         self.source_id = source_id
         self.host = host
@@ -103,7 +104,10 @@ class JetsonAlertDispatcher:
         self.heartbeat_seconds = max(5, int(heartbeat_seconds))
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread = None
-        self._publish_queue = queue.Queue()
+        if publish_queue_size is None:
+            publish_queue_size = _env_int(["MP_MQTT_QUEUE_SIZE", "MP_QTT_QUEUE_SIZE"], 256)
+        self._publish_queue = queue.Queue(maxsize=max(1, int(publish_queue_size)))
+        self.dropped_publishes = 0
         self._publish_stop = threading.Event()
         self._publish_thread = None
 
@@ -239,7 +243,7 @@ class JetsonAlertDispatcher:
         }
         encoded_payload = json.dumps(payload, separators=(",", ":"))
 
-        self._publish_queue.put(("alert", encoded_payload, self.topic, self.qos, self.retain))
+        self._enqueue_publish(("alert", encoded_payload, self.topic, self.qos, self.retain))
         return True
 
     def publish_presence(self, online, metadata=None, retain=True):
@@ -256,7 +260,7 @@ class JetsonAlertDispatcher:
         }
         encoded_payload = json.dumps(payload, separators=(",", ":"))
 
-        self._publish_queue.put(("presence", encoded_payload, self.status_topic, self.qos, retain))
+        self._enqueue_publish(("presence", encoded_payload, self.status_topic, self.qos, retain))
         return True
 
     def publish_heartbeat(self):
@@ -272,8 +276,26 @@ class JetsonAlertDispatcher:
         }
         encoded_payload = json.dumps(payload, separators=(",", ":"))
 
-        self._publish_queue.put(("heartbeat", encoded_payload, self.status_topic, self.qos, False))
+        self._enqueue_publish(("heartbeat", encoded_payload, self.status_topic, self.qos, False))
         return True
+
+    def _enqueue_publish(self, item):
+        try:
+            self._publish_queue.put_nowait(item)
+            return
+        except queue.Full:
+            pass
+
+        try:
+            self._publish_queue.get_nowait()
+            self.dropped_publishes += 1
+        except queue.Empty:
+            pass
+
+        try:
+            self._publish_queue.put_nowait(item)
+        except queue.Full:
+            self.dropped_publishes += 1
 
     def _heartbeat_loop(self):
         while not self._heartbeat_stop.wait(self.heartbeat_seconds):

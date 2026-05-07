@@ -20,7 +20,9 @@ bluetoothctl show || true
 echo
 
 echo "-- recent bridge log --"
-if [[ -f "$BLE_LOG" ]]; then
+if systemctl is-active --quiet sleepydrive-ble-bridge.service 2>/dev/null; then
+  journalctl -u sleepydrive-ble-bridge.service -n 80 --no-pager
+elif [[ -f "$BLE_LOG" ]]; then
   tail -n 80 "$BLE_LOG"
 else
   echo "missing: $BLE_LOG"
@@ -28,6 +30,9 @@ fi
 echo
 
 echo "-- startup markers --"
-if [[ -f "$BLE_LOG" ]]; then
+if systemctl is-active --quiet sleepydrive-ble-bridge.service 2>/dev/null; then
+  journalctl -u sleepydrive-ble-bridge.service -n 200 --no-pager \
+    | grep -E "BLE GATT application registered|BLE advertisement registered as|BLE bridge ready|BLE notifier failed to start|GATT registration failed|BLE advert failed" || true
+elif [[ -f "$BLE_LOG" ]]; then
   grep -E "BLE GATT application registered|BLE advertisement registered as|BLE bridge ready|BLE notifier failed to start|GATT registration failed|BLE advert failed" "$BLE_LOG" || true
 fi

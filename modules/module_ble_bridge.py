@@ -29,7 +29,10 @@ class UdpBleNotifier:
             print("BLE alerts disabled by MP_BLE_ENABLED=0")
             return
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._sock.settimeout(float(os.getenv("MP_BLE_BRIDGE_ACK_TIMEOUT", "0.75")))
+        self._sock.settimeout(float(os.getenv("MP_BLE_BRIDGE_ACK_TIMEOUT", "0.2")))
+        self._failure_backoff_sec = float(os.getenv("MP_BLE_BRIDGE_FAILURE_BACKOFF_SEC", "10.0"))
+        self._next_attempt_time = 0.0
+        self._consecutive_failures = 0
         if auto_start is None:
             auto_start = _env_bool("MP_BLE_BRIDGE_AUTOSTART", True)
         if auto_start and not self._bridge_port_in_use():
@@ -83,6 +86,10 @@ class UdpBleNotifier:
     def send_alert(self, level: int, message: str):
         if not self.enabled or self._sock is None:
             return False
+        now = time.monotonic()
+        if now < self._next_attempt_time:
+            return False
+
         clean_message = str(message).replace("\n", " ").replace("\r", " ")
         message_id = uuid.uuid4().hex
         payload = f"v1|{message_id}|{int(level)}|{clean_message}".encode(
@@ -90,7 +97,7 @@ class UdpBleNotifier:
             errors="ignore",
         )
         expected_ack = f"v1|{message_id}|ok".encode("ascii")
-        retries = max(1, int(os.getenv("MP_BLE_BRIDGE_SEND_ATTEMPTS", "2")))
+        retries = max(1, int(os.getenv("MP_BLE_BRIDGE_SEND_ATTEMPTS", "1")))
 
         with self._send_lock:
             for _attempt in range(retries):
@@ -98,9 +105,13 @@ class UdpBleNotifier:
                     self._sock.sendto(payload[:500], (self.host, self.port))
                     response, _addr = self._sock.recvfrom(128)
                     if response == expected_ack:
+                        self._consecutive_failures = 0
+                        self._next_attempt_time = 0.0
                         return True
                 except (OSError, socket.timeout):
                     continue
+        self._consecutive_failures += 1
+        self._next_attempt_time = time.monotonic() + self._failure_backoff_sec
         return False
 
     def stop(self):

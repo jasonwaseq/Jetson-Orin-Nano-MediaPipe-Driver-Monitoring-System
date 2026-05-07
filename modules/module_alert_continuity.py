@@ -12,9 +12,10 @@ class _ConditionState:
 class AlertContinuityTracker:
     """Emit throttled active/recovered events for ongoing unsafe conditions."""
 
-    def __init__(self, router, update_interval_sec=1.0):
+    def __init__(self, router, update_interval_sec=1.0, emit_initial_active=False):
         self.router = router
         self.update_interval_sec = max(0.1, float(update_interval_sec))
+        self.emit_initial_active = bool(emit_initial_active)
         self._conditions = {}
 
     def update_condition(
@@ -39,7 +40,7 @@ class AlertContinuityTracker:
             if not state.active:
                 state.active = True
                 state.active_since = active_since if active_since is not None else current_time
-                state.last_update_time = None
+                state.last_update_time = None if self.emit_initial_active else current_time
                 state.update_count = 0
 
             since = state.active_since if state.active_since is not None else current_time

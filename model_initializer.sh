@@ -29,17 +29,26 @@ export MPQTT_PASSWORD="$MP_MQTT_PASSWORD"
 export MPQTT_CLIENT_ID="$MP_MQTT_CLIENT_ID"
 
 export PYTHONPATH="/usr/lib/python3/dist-packages:/usr/local/lib/python3/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
+export MP_BLE_SET_DISCOVERABLE="${MP_BLE_SET_DISCOVERABLE:-true}"
+export MP_BLE_BRIDGE_ACK_TIMEOUT="${MP_BLE_BRIDGE_ACK_TIMEOUT:-0.2}"
+export MP_BLE_BRIDGE_SEND_ATTEMPTS="${MP_BLE_BRIDGE_SEND_ATTEMPTS:-1}"
+export MP_BLE_BRIDGE_FAILURE_BACKOFF_SEC="${MP_BLE_BRIDGE_FAILURE_BACKOFF_SEC:-10}"
+export MP_ALERT_UPDATE_INTERVAL_SEC="${MP_ALERT_UPDATE_INTERVAL_SEC:-3}"
+
+export MP_BLE_BRIDGE_AUTOSTART='false'
 
 bluetoothctl power on >/tmp/ble_btctl.log 2>&1 || true
-bluetoothctl discoverable on >/tmp/ble_btctl.log 2>&1 || true
 
-pkill -f 'ble\.ble_bridge_server' || true
-./venv/bin/python -u -m ble.ble_bridge_server > /tmp/ble_bridge.log 2>&1 &
-for _ in $(seq 1 120); do
-  grep -q "BLE bridge ready" /tmp/ble_bridge.log && break
-  sleep 0.1
-done
-export MP_BLE_BRIDGE_AUTOSTART='false'
+if systemctl is-active --quiet sleepydrive-ble-bridge.service 2>/dev/null; then
+  echo "Using supervised sleepydrive-ble-bridge.service"
+else
+  pkill -f 'ble\.ble_bridge_server' || true
+  ./venv/bin/python -u -m ble.ble_bridge_server > /tmp/ble_bridge.log 2>&1 &
+  for _ in $(seq 1 120); do
+    grep -q "BLE bridge ready" /tmp/ble_bridge.log && break
+    sleep 0.1
+  done
+fi
 
 pkill -f 'audio\.audio_bridge_server' || true
 ./venv/bin/python -u audio/audio_bridge_server.py > /tmp/audio_bridge.log 2>&1 &

@@ -152,6 +152,7 @@ router = EventRouter(
     dispatcher=dispatcher,
     ble_notifier=ble_notifier,
     sinks=sinks,
+    async_delivery=True,
 )
 
 if not sinks and dispatcher is None and ble_notifier is None:
@@ -478,6 +479,7 @@ finally:
         raw_out.release()
     if DISPLAY_ENABLED:
         cv2.destroyAllWindows()
+    router.stop()
     if ws_broadcaster is not None:
         ws_broadcaster.stop()
     if dispatcher is not None:

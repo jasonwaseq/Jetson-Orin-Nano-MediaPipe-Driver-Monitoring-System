@@ -1,4 +1,5 @@
 import uuid
+import time
 from datetime import datetime
 
 import pytest
@@ -113,3 +114,35 @@ def test_emit_alert_routes_to_all_configured_outputs(monkeypatch):
         "BLE alert sent ok=True code=drowsiness_detected",
         "Sound alert sent code=drowsiness_detected",
     ]
+
+
+def test_async_emit_alert_returns_before_slow_ble(monkeypatch):
+    monkeypatch.setattr(module_event_router, "utc_timestamp", lambda: "2026-05-06T00:00:00+00:00")
+
+    class SlowBle:
+        def __init__(self):
+            self.calls = []
+
+        def send_alert(self, level, message):
+            time.sleep(0.1)
+            self.calls.append((level, message))
+            return False
+
+    ble = SlowBle()
+    router = EventRouter(
+        "jetson-1",
+        "producer",
+        "1.0",
+        ble_notifier=ble,
+        async_delivery=True,
+    )
+    router.emit_log = lambda *args, **kwargs: None
+    try:
+        start = time.perf_counter()
+        router.emit_alert("drowsiness_detected", "eyes closed", severity="critical")
+        elapsed = time.perf_counter() - start
+    finally:
+        router.stop()
+
+    assert elapsed < 0.05
+    assert ble.calls == [(2, "eyes closed")]

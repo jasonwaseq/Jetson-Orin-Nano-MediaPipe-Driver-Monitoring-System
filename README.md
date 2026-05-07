@@ -40,6 +40,7 @@ No frame stream is sent by this script.
 - The BLE server code registers a BlueZ GATT app and advertisement over the system D-Bus, so it often needs elevated privileges on the Jetson. If startup prints `BLE notifier failed to start: ...`, try launching the detector with `sudo` or disable BLE temporarily with `export MP_BLE_ENABLED=0`.
 - A successful startup should print both `BLE GATT application registered` and `BLE advertisement registered as 'SleepyDrive'`. If you do not see those lines, the phone app will never discover `SleepyDrive`.
 - Run `./scripts/ble_health.sh` to quickly inspect bridge process state, adapter status, and BLE startup markers.
+- The detector sends BLE commands through a fast local bridge. If the bridge is unhealthy, sends fail fast and back off so the video monitor keeps rendering.
 
 ### Keep BLE bridge merge-ready (recommended)
 
@@ -58,6 +59,7 @@ When using this service, disable bridge autostart in detector shells:
 
 ```bash
 export MP_BLE_BRIDGE_AUTOSTART='false'
+export MP_BLE_SET_DISCOVERABLE='true'
 ```
 
 ## Automatic Setup
@@ -133,6 +135,10 @@ sleepydrive/alerts/+
 - BLE alert delivery is enabled by default in the Jetson entrypoints.
 - Bluetooth alerts are sent locally to subscribed phones and do not require internet access.
 - If the Bluetooth adapter or BlueZ stack is unavailable, the script logs the failure and continues with the remaining sinks.
+- `MP_BLE_BRIDGE_ACK_TIMEOUT` (default: `0.2`)
+- `MP_BLE_BRIDGE_SEND_ATTEMPTS` (default: `1`)
+- `MP_BLE_BRIDGE_FAILURE_BACKOFF_SEC` (default: `10`)
+- `MP_BLE_SET_DISCOVERABLE` (default: `1`; required on some Jetson/Realtek BlueZ stacks for reliable advertisement activation)
 
 ### Local WebSocket output (optional debug only)
 

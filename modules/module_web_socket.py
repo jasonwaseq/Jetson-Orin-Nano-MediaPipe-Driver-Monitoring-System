@@ -1,16 +1,20 @@
 
 import asyncio
 import json
+import os
 import queue
 import threading
 
 class WebSocketBroadcaster:
     """Broadcast JSON messages to all connected websocket clients."""
-    def __init__(self, host="0.0.0.0", port=8765):
+    def __init__(self, host="0.0.0.0", port=8765, queue_size=None):
         self.host = host
         self.port = port
         self.clients = set()
-        self.queue = queue.Queue()
+        if queue_size is None:
+            queue_size = int(os.getenv("MP_WS_QUEUE_SIZE", "128"))
+        self.queue = queue.Queue(maxsize=max(1, int(queue_size)))
+        self.dropped_messages = 0
         self.thread = None
         self.loop = None
         self._server = None
@@ -42,14 +46,29 @@ class WebSocketBroadcaster:
         try:
             self.queue.put_nowait(payload)
         except queue.Full:
-            pass
+            try:
+                self.queue.get_nowait()
+                self.dropped_messages += 1
+            except queue.Empty:
+                pass
+            try:
+                self.queue.put_nowait(payload)
+            except queue.Full:
+                self.dropped_messages += 1
 
     def stop(self):
         """Stop websocket server and worker loop."""
         if not self._enabled:
             return
         self._enabled = False
-        self.queue.put_nowait(None)
+        try:
+            self.queue.put_nowait(None)
+        except queue.Full:
+            try:
+                self.queue.get_nowait()
+            except queue.Empty:
+                pass
+            self.queue.put_nowait(None)
         if self.loop is not None:
             self.loop.call_soon_threadsafe(self.loop.stop)
         if self.thread is not None:
@@ -115,4 +134,3 @@ class WebSocketBroadcaster:
                     stale.append(client)
             for client in stale:
                 self.clients.discard(client)
-
