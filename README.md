@@ -163,11 +163,11 @@ Example `alert` payload:
   "producer": "mediapipe-driver-monitor",
   "sequence": 42,
   "code": "drowsiness_detected",
-  "message": "DROWSINESS DETECTED! Event #3 (eyes closed 1.6s)",
+  "message": "DROWSINESS DETECTED! Event #3 (eyes closed 3.1s)",
   "severity": "critical",
   "data": {
     "event_count": 3,
-    "closed_duration_sec": 1.634
+    "closed_duration_sec": 3.134
   }
 }
 ```

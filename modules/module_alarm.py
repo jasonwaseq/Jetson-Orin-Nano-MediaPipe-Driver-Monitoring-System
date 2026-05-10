@@ -53,7 +53,7 @@ def _speaker_device_present():
 #     This class is used for initiating the alarm so that the sound plays #
 #=========================================================================#
 class Alarm:
-    def __init__(self):
+    def __init__(self, max_active_seconds=7.0, clock=None):
         self.alarm_sound_path = _resolve_alarm_sound_path()
         self._player = shutil.which("aplay")
         self._thread = None
@@ -61,6 +61,14 @@ class Alarm:
         self._process_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._speaker_found = _speaker_device_present()
+        self.max_active_seconds = (
+            None if max_active_seconds is None else max(0.0, float(max_active_seconds))
+        )
+        self._clock = clock or time.monotonic
+        self._active = False
+        self._active_started_at = None
+        self._active_timed_out = False
+        self._active_alarm_started = False
         if self._player is None:
             print(f"Alarm disabled: missing 'aplay' for {self.alarm_sound_path}")
 
@@ -126,11 +134,37 @@ class Alarm:
         self._thread.start()
         return self._thread
 
+    def _active_timeout_reached(self):
+        if self.max_active_seconds is None or self._active_started_at is None:
+            return False
+        return self._clock() - self._active_started_at >= self.max_active_seconds
+
     def set_active(self, active):
-        if active:
-            self.start_background()
-        else:
+        if not active:
+            self._active = False
+            self._active_started_at = None
+            self._active_timed_out = False
+            self._active_alarm_started = False
             self.stop()
+            return
+
+        if not self._active:
+            self._active = True
+            self._active_started_at = self._clock()
+            self._active_timed_out = False
+            self._active_alarm_started = False
+
+        if self._active_timed_out:
+            return
+
+        if self._active_timeout_reached():
+            self._active_timed_out = True
+            self.stop()
+            return
+
+        if not self._active_alarm_started:
+            self.start_background()
+            self._active_alarm_started = True
 
     def stop(self):
         self.stop_playing_sound()

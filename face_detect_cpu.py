@@ -74,8 +74,8 @@ EAR_THRESHOLD = 0.21          # Below this = eyes closed (lowered for better sen
 EAR_CONSEC_FRAMES = 2         # Consecutive closed frames to register a blink
 
 # ── Drowsiness (Prolonged Eye Closure) Parameters ──
-DROWSY_TIME_THRESHOLD = 1.5   # Seconds of continuous eye closure = drowsy event
-OUT_OF_FRAME_TIME_THRESHOLD = 2.0  # Seconds without a face before alerting
+DROWSY_TIME_THRESHOLD = 3.0   # Seconds of continuous eye closure before alerting
+OUT_OF_FRAME_TIME_THRESHOLD = 3.0  # Seconds without a face before alerting
 ALERT_UPDATE_INTERVAL_SEC = env_int("MP_ALERT_UPDATE_INTERVAL_SEC", 1)
 
 # ── Head Pose (Attention) Parameters ──
@@ -83,7 +83,7 @@ ALERT_UPDATE_INTERVAL_SEC = env_int("MP_ALERT_UPDATE_INTERVAL_SEC", 1)
 # If the head's vertical position deviates from baseline for too long, flag inattention.
 HEAD_BASELINE_WINDOW = 90     # Frames to build initial baseline (~3s at 30fps)
 HEAD_DEVIATION_THRESHOLD = 0.06  # Normalized deviation from baseline to flag
-HEAD_INATTEN_TIME_THRESH = 2.0   # Seconds of sustained deviation = inattention event
+HEAD_INATTEN_TIME_THRESH = 3.0   # Seconds of sustained deviation before alerting
 HEAD_SMOOTHING_ALPHA = 0.3    # EMA smoothing for head position (0-1, lower = smoother)
 
 
